@@ -1,0 +1,100 @@
+Name,DisplayName,Description,StartMode,ServiceTypeRaw,ServiceTypeFlags,ImagePath,ResolvedExePath,ServiceDllPath,ResolvedDllPath,UserAccount,LastWriteTime,HashServiceExe,CertinfoServiceExe,HashServiceDll,CertinfoServiceDll
+.NET CLR Data,,,,,,,,,,,2023-09-22T11:43:23Z,,,,
+.NET CLR Networking,,,,,,,,,,,2023-09-22T11:43:23Z,,,,
+.NET CLR Networking 4.0.0.0,,,,,,,,,,,2023-09-22T06:14:48Z,,,,
+.NET Data Provider for Oracle,,,,,,,,,,,2023-09-22T06:14:48Z,,,,
+.NET Data Provider for SqlServer,,,,,,,,,,,2023-09-22T06:14:48Z,,,,
+.NET Memory Cache 4.0,,,,,,,,,,,2023-09-22T06:14:48Z,,,,
+.NETFramework,,,,,,,,,,,2023-09-22T06:14:48Z,,,,
+1394ohci,"@1394.inf,%PCI\CC_0C0010.DeviceDesc%;1394 OHCI Compliant Host Controller",,SERVICE_DEMAND_START,0x1,SERVICE_KERNEL_DRIVER,\SystemRoot\System32\drivers\1394ohci.sys,C:\Windows\System32\drivers\1394ohci.sys,,,,2023-09-22T06:14:48Z,"{
+ ""MD5"": ""809badbedd63ae4481fd65b8b20e8c0b"",
+ ""SHA1"": ""74dfffdd94ec2a3da6181d82fa116d239f5372d6"",
+ ""SHA256"": ""b69edd339389f2f4f77b8e24665abb9c6ec3c572c8bc23f54acfc551778d1a05""
+}","{
+ ""Filename"": ""C:\\Windows\\System32\\drivers\\1394ohci.sys"",
+ ""ProgramName"": null,
+ ""PublisherLink"": null,
+ ""MoreInfoLink"": null,
+ ""SerialNumber"": null,
+ ""IssuerName"": null,
+ ""SubjectName"": null,
+ ""Timestamp"": null,
+ ""Trusted"": ""untrusted"",
+ ""_ExtraInfo"": null
+}",,
+3ware,,,,0x1,SERVICE_KERNEL_DRIVER,System32\drivers\3ware.sys,C:\Windows\System32\drivers\3ware.sys,,,,2023-09-22T06:14:48Z,"{
+ ""MD5"": ""0652580a777f9d77aa409d8595cec672"",
+ ""SHA1"": ""ed70d296bd1d3f071a7592a0873142d5568fbdef"",
+ ""SHA256"": ""97a4859c0a861b394d9116a34d9a4cb98be2062acfc3e2c75ef603bfe8c1ff0d""
+}","{
+ ""Filename"": ""C:\\Windows\\System32\\drivers\\3ware.sys"",
+ ""ProgramName"": ""Microsoft Windows"",
+ ""PublisherLink"": null,
+ ""MoreInfoLink"": ""http://www.microsoft.com/windows"",
+ ""SerialNumber"": ""33000002ed2c45e4c145cf48440000000002ed"",
+ ""IssuerName"": ""C=US, ST=Washington, L=Redmond, O=Microsoft Corporation, CN=Microsoft Windows Production PCA 2011"",
+ ""SubjectName"": ""C=US, ST=Washington, L=Redmond, O=Microsoft Corporation, CN=Microsoft Windows"",
+ ""Timestamp"": null,
+ ""Trusted"": ""Unknown (No API access)"",
+ ""_ExtraInfo"": null
+}",,
+ACPI,"@acpi.inf,%ACPI.SvcDesc%;Microsoft ACPI Driver",,,0x1,SERVICE_KERNEL_DRIVER,System32\drivers\ACPI.sys,C:\Windows\System32\drivers\ACPI.sys,,,,2026-03-21T12:34:10Z,"{
+ ""MD5"": ""128242662d8f677e8d243dffe4c30acf"",
+ ""SHA1"": ""61e0facfd362b4e2ba65b786417826f53483b188"",
+ ""SHA256"": ""de08601714ecae17b8bfacafb374636fbca2e95bd250ef0a84e8807c161d33a4""
+}","{
+ ""Filename"": ""C:\\Windows\\System32\\drivers\\ACPI.sys"",
+ ""ProgramName"": ""Microsoft Windows"",
+ ""PublisherLink"": null,
+ ""MoreInfoLink"": ""http://www.microsoft.com/windows"",
+ ""SerialNumber"": ""33000002ed2c45e4c145cf48440000000002ed"",
+ ""IssuerName"": ""C=US, ST=Washington, L=Redmond, O=Microsoft Corporation, CN=Microsoft Windows Production PCA 2011"",
+ ""SubjectName"": ""C=US, ST=Washington, L=Redmond, O=Microsoft Corporation, CN=Microsoft Windows"",
+ ""Timestamp"": null,
+ ""Trusted"": ""Unknown (No API access)"",
+ ""_ExtraInfo"": null
+}",,
+ADOVMPPackage,,,,,,,,,,,2023-09-22T06:14:48Z,,,,
+ADP80XX,,,,0x1,SERVICE_KERNEL_DRIVER,System32\drivers\ADP80XX.SYS,C:\Windows\System32\drivers\ADP80XX.SYS,,,,2023-09-22T06:14:48Z,"{
+ ""MD5"": ""26bf7d01ddb616801aaeed81f0b74b5a"",
+ ""SHA1"": ""5fff5151c0909271ea8f94850f2c15bece6f6b23"",
+ ""SHA256"": ""aeb4ebc3705652034c094fbfb9bf45c1f9bd2876c36deb9f204fd1a3f28aaf6d""
+}","{
+ ""Filename"": ""C:\\Windows\\System32\\drivers\\ADP80XX.SYS"",
+ ""ProgramName"": ""Microsoft Windows"",
+ ""PublisherLink"": null,
+ ""MoreInfoLink"": ""http://www.microsoft.com/windows"",
+ ""SerialNumber"": ""33000002ed2c45e4c145cf48440000000002ed"",
+ ""IssuerName"": ""C=US, ST=Washington, L=Redmond, O=Microsoft Corporation, CN=Microsoft Windows Production PCA 2011"",
+ ""SubjectName"": ""C=US, ST=Washington, L=Redmond, O=Microsoft Corporation, CN=Microsoft Windows"",
+ ""Timestamp"": null,
+ ""Trusted"": ""Unknown (No API access)"",
+ ""_ExtraInfo"": null
+}",,
+AFD,"@%systemroot%\system32\drivers\afd.sys,-1000","@%systemroot%\system32\drivers\afd.sys,-1000",SERVICE_SYSTEM_START,0x1,SERVICE_KERNEL_DRIVER,\SystemRoot\system32\drivers\afd.sys,C:\Windows\system32\drivers\afd.sys,,,,2023-09-22T06:14:48Z,"{
+ ""MD5"": ""fc13d6bc719d710c66544cbb5e8d8325"",
+ ""SHA1"": ""d5b017ad44cc719298cbfbddd2e966fbb451faa2"",
+ ""SHA256"": ""f880d654d486d9e282e507d5613cfc7928f2c586bcaf9be629b665cd58d2caa8""
+}","{
+ ""Filename"": ""C:\\Windows\\system32\\drivers\\afd.sys"",
+ ""ProgramName"": ""Microsoft Windows"",
+ ""PublisherLink"": null,
+ ""MoreInfoLink"": ""http://www.microsoft.com/windows"",
+ ""SerialNumber"": ""330000033c89c66a7b45bb1fbd00000000033c"",
+ ""IssuerName"": ""C=US, ST=Washington, L=Redmond, O=Microsoft Corporation, CN=Microsoft Windows Production PCA 2011"",
+ ""SubjectName"": ""C=US, ST=Washington, L=Redmond, O=Microsoft Corporation, CN=Microsoft Windows"",
+ ""Timestamp"": null,
+ ""Trusted"": ""Unknown (No API access)"",
+ ""_ExtraInfo"": null
+}",,
+AJRouter,"@%SystemRoot%\system32\AJRouter.dll,-2","@%SystemRoot%\system32\AJRouter.dll,-1",SERVICE_DEMAND_START,0x20,SERVICE_WIN32_SHARE_PROCESS,%SystemRoot%\system32\svchost.exe -k LocalServiceNetworkRestricted -p,C:\Windows\system32\svchost.exe,%SystemRoot%\System32\AJRouter.dll,C:\Windows\System32\AJRouter.dll,NT AUTHORITY\LocalService,2023-09-22T06:14:48Z,"{
+ ""MD5"": ""dc32aba4669eafb22fcacd5ec836a107"",
+ ""SHA1"": ""da7a6e7798d448cd593b11735e2b614ec2b75b29"",
+ ""SHA256"": ""31780ff2aaf7bc71f755ba0e4fef1d61b060d1d2741eafb33cbab44d889595a0""
+}","{
+ ""Filename"": ""C:\\Windows\\system32\\svchost.exe"",
+ ""ProgramName"": ""Microsoft Windows"",
+ ""PublisherLink"": null,
+ ""MoreInfoLink"": ""http://www.microsoft.com/windows"",
+ ""SerialNumber"": ""33000002f49e469c54137b85e00000000002f4"",
+ ""IssuerName"": ""C=US, ST=Washington, L=Redmond, O=Microsoft Corporation, CN=Microsoft Windows Production PCA 2011"",

@@ -1,0 +1,226 @@
+name: Windows.Forensics.Services.DeadDisk
+description: |
+  Enumerates Windows services from an offline SYSTEM hive.
+  Improves accuracy for dead disk forensic analysis with correct ControlSet resolution.
+
+parameters:
+  - name: SystemHivePath
+    default: C:/Windows/System32/config/SYSTEM
+
+  - name: ControlSet
+    description: "Optional override. If empty, resolve from Select\\Current"
+    default: ""
+
+  - name: Calculate_hashes
+    default: Y
+    type: bool
+
+  - name: CertificateInfo
+    default: Y
+    type: bool
+
+  - name: NameRegex
+    default: .
+    type: regex
+
+sources:
+  - query: |
+      -- 1. Resolve ControlSet
+      LET current_controlset_row = SELECT Current
+      FROM read_reg_key(
+        globs=["Select"],
+        root=pathspec(DelegatePath=SystemHivePath),
+        accessor="raw_reg"
+      )
+
+      LET resolved_controlset = SELECT
+        if(
+          condition=ControlSet,
+          then=ControlSet,
+          else=format(format="ControlSet%03d", args=Current)
+        ) AS ControlSetName
+      FROM current_controlset_row
+
+      -- 2. Enumerate service keys
+      LET service_step1 = SELECT *
+      FROM foreach(
+        row=resolved_controlset,
+        query={
+          SELECT
+            Name,
+            Mtime AS LastWriteTime,
+            {
+              SELECT DisplayName
+              FROM read_reg_key(
+                globs=[ControlSetName + "\\Services\\" + Name],
+                root=pathspec(DelegatePath=SystemHivePath),
+                accessor="raw_reg"
+              )
+            } AS DisplayName,
+            {
+              SELECT Description
+              FROM read_reg_key(
+                globs=[ControlSetName + "\\Services\\" + Name],
+                root=pathspec(DelegatePath=SystemHivePath),
+                accessor="raw_reg"
+              )
+            } AS Description,
+            {
+              SELECT ImagePath
+              FROM read_reg_key(
+                globs=[ControlSetName + "\\Services\\" + Name],
+                root=pathspec(DelegatePath=SystemHivePath),
+                accessor="raw_reg"
+              )
+            } AS RawPathName,
+            {
+              SELECT Start
+              FROM read_reg_key(
+                globs=[ControlSetName + "\\Services\\" + Name],
+                root=pathspec(DelegatePath=SystemHivePath),
+                accessor="raw_reg"
+              )
+            } AS StartValue,
+            {
+              SELECT Type
+              FROM read_reg_key(
+                globs=[ControlSetName + "\\Services\\" + Name],
+                root=pathspec(DelegatePath=SystemHivePath),
+                accessor="raw_reg"
+              )
+            } AS TypeValue,
+            {
+              SELECT ObjectName
+              FROM read_reg_key(
+                globs=[ControlSetName + "\\Services\\" + Name],
+                root=pathspec(DelegatePath=SystemHivePath),
+                accessor="raw_reg"
+              )
+            } AS UserAccount,
+            {
+              SELECT ServiceDll
+              FROM read_reg_key(
+                globs=[ControlSetName + "\\Services\\" + Name + "\\Parameters"],
+                root=pathspec(DelegatePath=SystemHivePath),
+                accessor="raw_reg"
+              )
+            } AS RawServiceDll
+          FROM glob(
+            globs=ControlSetName + "\\Services\\*",
+            root=pathspec(DelegatePath=SystemHivePath),
+            accessor="raw_reg"
+          )
+          WHERE Data.type =~ "Key"
+            AND Name =~ NameRegex
+        }
+      )
+
+      -- 3. Extract executable path from ImagePath
+      LET service_step2 = SELECT *,
+        parse_string_with_regex(
+          regex=['^"(?P<P>[^"]+)', '(?P<P>^[^ "]+)'],
+          string=RawPathName
+        ).P AS CleanExePath
+      FROM service_step1
+
+      -- 4. Resolve common path patterns
+      LET service_step3 = SELECT *,
+        if(
+          condition=CleanExePath,
+          then=if(
+            condition=CleanExePath =~ '(?i)^(%SystemRoot%|%windir%|\\\\SystemRoot)',
+            then=regex_replace(
+              source=CleanExePath,
+              re='(?i)^(%SystemRoot%|%windir%|\\\\SystemRoot)',
+              replace='C:\\Windows'
+            ),
+            else=if(
+              condition=CleanExePath =~ '(?i)^system32',
+              then='C:\\Windows\\' + CleanExePath,
+              else=CleanExePath
+            )
+          )
+        ) AS ResolvedExePath,
+
+        if(
+          condition=RawServiceDll,
+          then=if(
+            condition=RawServiceDll =~ '(?i)^(%SystemRoot%|%windir%|\\\\SystemRoot)',
+            then=regex_replace(
+              source=RawServiceDll,
+              re='(?i)^(%SystemRoot%|%windir%|\\\\SystemRoot)',
+              replace='C:\\Windows'
+            ),
+            else=if(
+              condition=RawServiceDll =~ '(?i)^system32',
+              then='C:\\Windows\\' + RawServiceDll,
+              else=RawServiceDll
+            )
+          )
+        ) AS ResolvedDllPath
+      FROM service_step2
+
+      -- 5. Final output
+      SELECT
+        Name,
+        DisplayName,
+        Description,
+
+        if(condition=NOT StartValue, then="",
+        else=if(condition=StartValue = 0, then="SERVICE_BOOT_START",
+        else=if(condition=StartValue = 1, then="SERVICE_SYSTEM_START",
+        else=if(condition=StartValue = 2, then="SERVICE_AUTO_START",
+        else=if(condition=StartValue = 3, then="SERVICE_DEMAND_START",
+        else=if(condition=StartValue = 4, then="SERVICE_DISABLED",
+        else=format(format="%v", args=StartValue))))))) AS StartMode,
+
+        if(
+          condition=TypeValue,
+          then=format(format="0x%x", args=TypeValue),
+          else=""
+        ) AS ServiceTypeRaw,
+
+        if(condition=NOT TypeValue, then="",
+        else=if(condition=TypeValue = 1, then="SERVICE_KERNEL_DRIVER",
+        else=if(condition=TypeValue = 2, then="SERVICE_FILE_SYSTEM_DRIVER",
+        else=if(condition=TypeValue = 4, then="SERVICE_ADAPTER",
+        else=if(condition=TypeValue = 8, then="SERVICE_RECOGNIZER_DRIVER",
+        else=if(condition=TypeValue = 16, then="SERVICE_WIN32_OWN_PROCESS",
+        else=if(condition=TypeValue = 32, then="SERVICE_WIN32_SHARE_PROCESS",
+        else=if(condition=TypeValue = 80, then="SERVICE_USER_OWN_PROCESS",
+        else=if(condition=TypeValue = 96, then="SERVICE_USER_SHARE_PROCESS",
+        else=if(condition=TypeValue = 208, then="SERVICE_USER_OWN_PROCESS | SERVICE_INTERACTIVE_PROCESS",
+        else=if(condition=TypeValue = 224, then="SERVICE_USER_SHARE_PROCESS | SERVICE_INTERACTIVE_PROCESS",
+        else=if(condition=TypeValue = 256, then="SERVICE_INTERACTIVE_PROCESS",
+        else=if(condition=TypeValue = 272, then="SERVICE_WIN32_OWN_PROCESS | SERVICE_INTERACTIVE_PROCESS",
+        else=if(condition=TypeValue = 288, then="SERVICE_WIN32_SHARE_PROCESS | SERVICE_INTERACTIVE_PROCESS",
+        else=format(format="0x%x", args=TypeValue))))))))))))))) AS ServiceTypeFlags,
+
+        RawPathName AS ImagePath,
+        ResolvedExePath,
+        RawServiceDll AS ServiceDllPath,
+        ResolvedDllPath,
+        UserAccount,
+        LastWriteTime,
+
+        if(
+          condition=Calculate_hashes AND ResolvedExePath,
+          then=hash(path=ResolvedExePath, accessor="auto")
+        ) AS HashServiceExe,
+
+        if(
+          condition=CertificateInfo AND ResolvedExePath,
+          then=authenticode(filename=ResolvedExePath)
+        ) AS CertinfoServiceExe,
+
+        if(
+          condition=Calculate_hashes AND ResolvedDllPath,
+          then=hash(path=ResolvedDllPath, accessor="auto")
+        ) AS HashServiceDll,
+
+        if(
+          condition=CertificateInfo AND ResolvedDllPath,
+          then=authenticode(filename=ResolvedDllPath)
+        ) AS CertinfoServiceDll
+
+      FROM service_step3
