@@ -1,0 +1,2 @@
+Scope,User,HivePath,KeyPath,LastKeyWrite,ValueName,Command,ResolvedPath,HashInfo,CertInfo
+HKCU,Administrator,C:\Users\Administrator\NTUSER.DAT,Software\Microsoft\Windows\CurrentVersion\RunOnce,2026-04-10T14:04:02Z,TestRunOnce,cmd.exe,cmd.exe,,
