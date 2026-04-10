@@ -1,0 +1,510 @@
+name: Windows.Forensics.RunKeys.DeadDisk
+description: |
+  Enumerate Run / RunOnce persistence from offline registry hives.
+
+  This artifact is designed for dead disk forensic analysis using raw_reg
+  with NTFS-backed hive access.
+
+  Current version provides:
+  - HKLM / HKCU coverage
+  - Run / RunOnce coverage
+  - One registry value per row
+  - Key last write time
+  - Executable path extraction from command line
+  - Hash and Authenticode information for extracted executable path
+
+  Notes:
+  - LastKeyWrite is the registry key last write time, not a per-value timestamp.
+  - ResolvedPath is a conservatively extracted launcher path from Command.
+    It is not guaranteed to be the final payload path.
+  - For commands such as cmd.exe, powershell.exe, or rundll32.exe,
+    ResolvedPath may represent the launcher executable only.
+  - HashInfo and CertInfo may be empty when the path is relative, bare filename,
+    missing from disk, or unsupported for signature parsing.
+
+type: CLIENT
+
+precondition: |
+  SELECT OS
+  FROM info()
+  WHERE OS = "windows"
+
+parameters:
+  - name: UserHiveGlobs
+    default: C:\Users\*\NTUSER.DAT
+
+  - name: SoftwareHivePath
+    default: C:\Windows\System32\config\SOFTWARE
+
+  - name: CalculateHashes
+    type: bool
+    default: Y
+
+  - name: CertificateInfo
+    type: bool
+    default: Y
+
+sources:
+  - name: HKLM_Run
+    query: |
+      LET key_rows = SELECT
+        Mtime AS LastKeyWrite
+      FROM glob(
+        globs="Microsoft\\Windows\\CurrentVersion\\Run",
+        root=pathspec(
+          DelegateAccessor="ntfs",
+          DelegatePath=SoftwareHivePath
+        ),
+        accessor="raw_reg"
+      )
+
+      LET run_step1 = SELECT
+        "HKLM" AS Scope,
+        "" AS User,
+        SoftwareHivePath AS HivePath,
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Run" AS KeyPath,
+        LastKeyWrite,
+        _key AS ValueName,
+        _value AS Command
+      FROM foreach(
+        row=key_rows,
+        query={
+          SELECT
+            LastKeyWrite,
+            _key,
+            _value
+          FROM foreach(
+            row={
+              SELECT _value AS Row
+              FROM items(item={
+                SELECT *
+                FROM read_reg_key(
+                  globs=["Microsoft\\Windows\\CurrentVersion\\Run"],
+                  root=pathspec(
+                    DelegateAccessor="ntfs",
+                    DelegatePath=SoftwareHivePath
+                  ),
+                  accessor="raw_reg"
+                )
+              })
+            },
+            query={
+              SELECT
+                LastKeyWrite,
+                _key,
+                _value
+              FROM items(item=Row)
+              WHERE _key != "Key"
+            }
+          )
+        }
+      )
+
+      LET run_step2 = SELECT *,
+        parse_string_with_regex(
+          regex=['^"(?P<P>[^"]+)', '(?P<P>^[^ "]+)'],
+          string=Command
+        ).P AS ExtractedPath
+      FROM run_step1
+
+      LET run_step3 = SELECT *,
+        if(
+          condition=ExtractedPath,
+          then=if(
+            condition=ExtractedPath =~ '(?i)^(%SystemRoot%|%windir%|\\\\SystemRoot)',
+            then=regex_replace(
+              source=ExtractedPath,
+              re='(?i)^(%SystemRoot%|%windir%|\\\\SystemRoot)',
+              replace='C:\\Windows'
+            ),
+            else=if(
+              condition=ExtractedPath =~ '(?i)^system32',
+              then='C:\\Windows\\' + ExtractedPath,
+              else=ExtractedPath
+            )
+          )
+        ) AS ResolvedPath
+      FROM run_step2
+
+      LET run_step4 = SELECT *,
+        if(
+          condition=CalculateHashes AND ResolvedPath,
+          then=hash(path=ResolvedPath, accessor="auto")
+        ) AS HashInfo,
+        if(
+          condition=CertificateInfo AND ResolvedPath,
+          then=authenticode(filename=ResolvedPath)
+        ) AS CertInfo
+      FROM run_step3
+
+      SELECT
+        Scope,
+        User,
+        HivePath,
+        KeyPath,
+        LastKeyWrite,
+        ValueName,
+        Command,
+        ResolvedPath,
+        HashInfo,
+        CertInfo
+      FROM run_step4
+      ORDER BY ValueName
+
+  - name: HKLM_RunOnce
+    query: |
+      LET key_rows = SELECT
+        Mtime AS LastKeyWrite
+      FROM glob(
+        globs="Microsoft\\Windows\\CurrentVersion\\RunOnce",
+        root=pathspec(
+          DelegateAccessor="ntfs",
+          DelegatePath=SoftwareHivePath
+        ),
+        accessor="raw_reg"
+      )
+
+      LET run_step1 = SELECT
+        "HKLM" AS Scope,
+        "" AS User,
+        SoftwareHivePath AS HivePath,
+        "Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce" AS KeyPath,
+        LastKeyWrite,
+        _key AS ValueName,
+        _value AS Command
+      FROM foreach(
+        row=key_rows,
+        query={
+          SELECT
+            LastKeyWrite,
+            _key,
+            _value
+          FROM foreach(
+            row={
+              SELECT _value AS Row
+              FROM items(item={
+                SELECT *
+                FROM read_reg_key(
+                  globs=["Microsoft\\Windows\\CurrentVersion\\RunOnce"],
+                  root=pathspec(
+                    DelegateAccessor="ntfs",
+                    DelegatePath=SoftwareHivePath
+                  ),
+                  accessor="raw_reg"
+                )
+              })
+            },
+            query={
+              SELECT
+                LastKeyWrite,
+                _key,
+                _value
+              FROM items(item=Row)
+              WHERE _key != "Key"
+            }
+          )
+        }
+      )
+
+      LET run_step2 = SELECT *,
+        parse_string_with_regex(
+          regex=['^"(?P<P>[^"]+)', '(?P<P>^[^ "]+)'],
+          string=Command
+        ).P AS ExtractedPath
+      FROM run_step1
+
+      LET run_step3 = SELECT *,
+        if(
+          condition=ExtractedPath,
+          then=if(
+            condition=ExtractedPath =~ '(?i)^(%SystemRoot%|%windir%|\\\\SystemRoot)',
+            then=regex_replace(
+              source=ExtractedPath,
+              re='(?i)^(%SystemRoot%|%windir%|\\\\SystemRoot)',
+              replace='C:\\Windows'
+            ),
+            else=if(
+              condition=ExtractedPath =~ '(?i)^system32',
+              then='C:\\Windows\\' + ExtractedPath,
+              else=ExtractedPath
+            )
+          )
+        ) AS ResolvedPath
+      FROM run_step2
+
+      LET run_step4 = SELECT *,
+        if(
+          condition=CalculateHashes AND ResolvedPath,
+          then=hash(path=ResolvedPath, accessor="auto")
+        ) AS HashInfo,
+        if(
+          condition=CertificateInfo AND ResolvedPath,
+          then=authenticode(filename=ResolvedPath)
+        ) AS CertInfo
+      FROM run_step3
+
+      SELECT
+        Scope,
+        User,
+        HivePath,
+        KeyPath,
+        LastKeyWrite,
+        ValueName,
+        Command,
+        ResolvedPath,
+        HashInfo,
+        CertInfo
+      FROM run_step4
+      ORDER BY ValueName
+
+  - name: HKCU_Run
+    query: |
+      LET hive_rows = SELECT
+        OSPath AS HivePath,
+        OSPath[2] AS User
+      FROM glob(globs=UserHiveGlobs)
+
+      LET key_rows = SELECT
+        User,
+        HivePath,
+        Mtime AS LastKeyWrite
+      FROM foreach(
+        row=hive_rows,
+        query={
+          SELECT
+            User,
+            HivePath,
+            Mtime
+          FROM glob(
+            globs="Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            root=pathspec(
+              DelegateAccessor="ntfs",
+              DelegatePath=HivePath
+            ),
+            accessor="raw_reg"
+          )
+        }
+      )
+
+      LET run_step1 = SELECT
+        "HKCU" AS Scope,
+        User,
+        HivePath,
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Run" AS KeyPath,
+        LastKeyWrite,
+        _key AS ValueName,
+        _value AS Command
+      FROM foreach(
+        row=key_rows,
+        query={
+          SELECT
+            User,
+            HivePath,
+            LastKeyWrite,
+            _key,
+            _value
+          FROM foreach(
+            row={
+              SELECT _value AS Row
+              FROM items(item={
+                SELECT *
+                FROM read_reg_key(
+                  globs=["Software\\Microsoft\\Windows\\CurrentVersion\\Run"],
+                  root=pathspec(
+                    DelegateAccessor="ntfs",
+                    DelegatePath=HivePath
+                  ),
+                  accessor="raw_reg"
+                )
+              })
+            },
+            query={
+              SELECT
+                User,
+                HivePath,
+                LastKeyWrite,
+                _key,
+                _value
+              FROM items(item=Row)
+              WHERE _key != "Key"
+            }
+          )
+        }
+      )
+
+      LET run_step2 = SELECT *,
+        parse_string_with_regex(
+          regex=['^"(?P<P>[^"]+)', '(?P<P>^[^ "]+)'],
+          string=Command
+        ).P AS ExtractedPath
+      FROM run_step1
+
+      LET run_step3 = SELECT *,
+        if(
+          condition=ExtractedPath,
+          then=if(
+            condition=ExtractedPath =~ '(?i)^(%SystemRoot%|%windir%|\\\\SystemRoot)',
+            then=regex_replace(
+              source=ExtractedPath,
+              re='(?i)^(%SystemRoot%|%windir%|\\\\SystemRoot)',
+              replace='C:\\Windows'
+            ),
+            else=if(
+              condition=ExtractedPath =~ '(?i)^system32',
+              then='C:\\Windows\\' + ExtractedPath,
+              else=ExtractedPath
+            )
+          )
+        ) AS ResolvedPath
+      FROM run_step2
+
+      LET run_step4 = SELECT *,
+        if(
+          condition=CalculateHashes AND ResolvedPath,
+          then=hash(path=ResolvedPath, accessor="auto")
+        ) AS HashInfo,
+        if(
+          condition=CertificateInfo AND ResolvedPath,
+          then=authenticode(filename=ResolvedPath)
+        ) AS CertInfo
+      FROM run_step3
+
+      SELECT
+        Scope,
+        User,
+        HivePath,
+        KeyPath,
+        LastKeyWrite,
+        ValueName,
+        Command,
+        ResolvedPath,
+        HashInfo,
+        CertInfo
+      FROM run_step4
+      ORDER BY User
+
+  - name: HKCU_RunOnce
+    query: |
+      LET hive_rows = SELECT
+        OSPath AS HivePath,
+        OSPath[2] AS User
+      FROM glob(globs=UserHiveGlobs)
+
+      LET key_rows = SELECT
+        User,
+        HivePath,
+        Mtime AS LastKeyWrite
+      FROM foreach(
+        row=hive_rows,
+        query={
+          SELECT
+            User,
+            HivePath,
+            Mtime
+          FROM glob(
+            globs="Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
+            root=pathspec(
+              DelegateAccessor="ntfs",
+              DelegatePath=HivePath
+            ),
+            accessor="raw_reg"
+          )
+        }
+      )
+
+      LET run_step1 = SELECT
+        "HKCU" AS Scope,
+        User,
+        HivePath,
+        "Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce" AS KeyPath,
+        LastKeyWrite,
+        _key AS ValueName,
+        _value AS Command
+      FROM foreach(
+        row=key_rows,
+        query={
+          SELECT
+            User,
+            HivePath,
+            LastKeyWrite,
+            _key,
+            _value
+          FROM foreach(
+            row={
+              SELECT _value AS Row
+              FROM items(item={
+                SELECT *
+                FROM read_reg_key(
+                  globs=["Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce"],
+                  root=pathspec(
+                    DelegateAccessor="ntfs",
+                    DelegatePath=HivePath
+                  ),
+                  accessor="raw_reg"
+                )
+              })
+            },
+            query={
+              SELECT
+                User,
+                HivePath,
+                LastKeyWrite,
+                _key,
+                _value
+              FROM items(item=Row)
+              WHERE _key != "Key"
+            }
+          )
+        }
+      )
+
+      LET run_step2 = SELECT *,
+        parse_string_with_regex(
+          regex=['^"(?P<P>[^"]+)', '(?P<P>^[^ "]+)'],
+          string=Command
+        ).P AS ExtractedPath
+      FROM run_step1
+
+      LET run_step3 = SELECT *,
+        if(
+          condition=ExtractedPath,
+          then=if(
+            condition=ExtractedPath =~ '(?i)^(%SystemRoot%|%windir%|\\\\SystemRoot)',
+            then=regex_replace(
+              source=ExtractedPath,
+              re='(?i)^(%SystemRoot%|%windir%|\\\\SystemRoot)',
+              replace='C:\\Windows'
+            ),
+            else=if(
+              condition=ExtractedPath =~ '(?i)^system32',
+              then='C:\\Windows\\' + ExtractedPath,
+              else=ExtractedPath
+            )
+          )
+        ) AS ResolvedPath
+      FROM run_step2
+
+      LET run_step4 = SELECT *,
+        if(
+          condition=CalculateHashes AND ResolvedPath,
+          then=hash(path=ResolvedPath, accessor="auto")
+        ) AS HashInfo,
+        if(
+          condition=CertificateInfo AND ResolvedPath,
+          then=authenticode(filename=ResolvedPath)
+        ) AS CertInfo
+      FROM run_step3
+
+      SELECT
+        Scope,
+        User,
+        HivePath,
+        KeyPath,
+        LastKeyWrite,
+        ValueName,
+        Command,
+        ResolvedPath,
+        HashInfo,
+        CertInfo
+      FROM run_step4
+      ORDER BY User
