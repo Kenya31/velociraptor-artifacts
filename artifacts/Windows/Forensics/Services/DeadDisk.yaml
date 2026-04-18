@@ -1,7 +1,30 @@
 name: Windows.Forensics.Services.DeadDisk
 description: |
-  Enumerates Windows services from an offline SYSTEM hive.
-  Improves accuracy for dead disk forensic analysis with correct ControlSet resolution.
+  Enumerate Windows services from an offline SYSTEM hive.
+
+  This artifact is designed for dead disk DFIR triage and improves
+  accuracy by resolving the active ControlSet before enumerating services.
+
+  Current version provides:
+  - Offline service enumeration from the SYSTEM hive
+  - ControlSet resolution via Select\Current
+  - ImagePath and optional ServiceDll extraction
+  - Conservative path normalization for executable and DLL paths
+  - File metadata, SHA256, and Authenticode information when referenced files exist
+  - Notes when resolved executable or DLL paths are not present on disk
+
+  Notes:
+  - ResolvedExePath and ResolvedDllPath are normalized investigation paths.
+    They may not always represent the final runtime payload in complex service setups.
+  - Hash and signature fields may be empty when the referenced file is missing,
+    unresolved, or unsupported for signature parsing.
+
+type: CLIENT
+
+precondition: |
+  SELECT OS
+  FROM info()
+  WHERE OS = "windows"
 
 parameters:
   - name: SystemHivePath
@@ -160,7 +183,38 @@ sources:
         ) AS ResolvedDllPath
       FROM service_step2
 
-      -- 5. Final output
+      -- 5. Collect file metadata before enrichment
+      LET service_step4 = SELECT *,
+        if(
+          condition=ResolvedExePath,
+          then={
+            SELECT
+              Size,
+              Btime,
+              Ctime,
+              Mtime,
+              Atime,
+              Mode.String AS Mode
+            FROM stat(filename=ResolvedExePath, accessor="auto")
+          }
+        ) AS ServiceExeFileInfo,
+
+        if(
+          condition=ResolvedDllPath,
+          then={
+            SELECT
+              Size,
+              Btime,
+              Ctime,
+              Mtime,
+              Atime,
+              Mode.String AS Mode
+            FROM stat(filename=ResolvedDllPath, accessor="auto")
+          }
+        ) AS ServiceDllFileInfo
+      FROM service_step3
+
+      -- 6. Final output
       SELECT
         Name,
         DisplayName,
@@ -202,25 +256,49 @@ sources:
         ResolvedDllPath,
         UserAccount,
         LastWriteTime,
+        ServiceExeFileInfo,
+        ServiceDllFileInfo,
 
         if(
-          condition=Calculate_hashes AND ResolvedExePath,
+          condition=Calculate_hashes AND ResolvedExePath AND ServiceExeFileInfo,
           then=hash(path=ResolvedExePath, accessor="auto")
         ) AS HashServiceExe,
 
         if(
-          condition=CertificateInfo AND ResolvedExePath,
+          condition=CertificateInfo AND ResolvedExePath AND ServiceExeFileInfo,
           then=authenticode(filename=ResolvedExePath)
         ) AS CertinfoServiceExe,
 
         if(
-          condition=Calculate_hashes AND ResolvedDllPath,
+          condition=Calculate_hashes AND ResolvedDllPath AND ServiceDllFileInfo,
           then=hash(path=ResolvedDllPath, accessor="auto")
         ) AS HashServiceDll,
 
         if(
-          condition=CertificateInfo AND ResolvedDllPath,
+          condition=CertificateInfo AND ResolvedDllPath AND ServiceDllFileInfo,
           then=authenticode(filename=ResolvedDllPath)
-        ) AS CertinfoServiceDll
+        ) AS CertinfoServiceDll,
 
-      FROM service_step3
+        if(
+          condition=ResolvedExePath AND NOT ServiceExeFileInfo,
+          then="Resolved service executable not found on disk image"
+        ) AS NoteServiceExe,
+
+        if(
+          condition=ResolvedDllPath AND NOT ServiceDllFileInfo,
+          then="Resolved service DLL not found on disk image"
+        ) AS NoteServiceDll
+
+      FROM service_step4
+
+column_types:
+  - name: LastWriteTime
+    type: timestamp
+  - name: ServiceExeFileInfo
+    type: collapsed
+  - name: ServiceDllFileInfo
+    type: collapsed
+  - name: CertinfoServiceExe
+    type: collapsed
+  - name: CertinfoServiceDll
+    type: collapsed
