@@ -1,0 +1,325 @@
+name: Windows.Forensics.ScheduledTasks.DeadDisk
+description: |
+  Detect scheduled task persistence from dead disk.
+
+  This artifact is designed for offline DFIR triage and relies on
+  filesystem task definitions instead of live Task Scheduler APIs or WMI.
+
+  Current version provides:
+  - Task XML parsing from C:/Windows/System32/Tasks/**
+  - One normalized row per task action
+  - Task metadata useful for DFIR triage
+  - Conservative payload path normalization
+  - SHA256, Authenticode, and file metadata for referenced payloads when present
+  - Safe handling for missing payload files
+
+  Notes:
+  - PayloadPath is a conservative executable path derived from Exec.Command.
+  - For launcher-style commands such as cmd.exe or powershell.exe, PayloadPath
+    may represent the launcher rather than the final script or secondary payload.
+  - COM handler actions usually do not expose a direct payload path from the task XML.
+
+type: CLIENT
+
+precondition: |
+  SELECT OS
+  FROM info()
+  WHERE OS = "windows"
+
+parameters:
+  - name: TasksPath
+    default: C:/Windows/System32/Tasks/**
+
+  - name: TaskNameRegex
+    type: regex
+    default: .
+
+  - name: CalculateHashes
+    type: bool
+    default: Y
+
+  - name: CertificateInfo
+    type: bool
+    default: Y
+
+sources:
+  - name: Analysis
+    query: |
+      LET _ExpandedTransforms <= dict(
+        `^\\\\SystemRoot\\\\`='"%SystemRoot%\\',
+        `^system32\\\\`='"%SystemRoot%\\System32\\',
+        `^{.+}.+`='\\$0',
+        `^.:\\\\Program Files[^\\\\]*\\\\[^ ]+`='"$0"',
+        `^%[^ ]+%[^ ]+`='"$0"'
+      )
+
+      LET _NormalizeExecutable(Command, WorkingDirectory) = if(
+        condition=Command,
+        then=regex_replace(
+          source=regex_replace(
+            source=regex_replace(
+              source=regex_replace(
+                source=regex_replace(
+                  source=if(
+                    condition=Command =~ '^[^\\\\/:]+$' AND WorkingDirectory,
+                    then=WorkingDirectory + "\\" + Command,
+                    else=commandline_split(
+                      command=regex_transform(source=Command, map=_ExpandedTransforms)
+                    )[0]
+                  ),
+                  re='(?i)^%ProgramData%',
+                  replace='C:\\ProgramData'
+                ),
+                re='/',
+                replace='\\'
+              ),
+              re='(?i)^(%SystemRoot%|%windir%|\\\\SystemRoot)',
+              replace='C:\\Windows'
+            ),
+            re='(?i)^system32',
+            replace='C:\\Windows\\System32'
+          ),
+          re='(?i)^%SystemDrive%',
+          replace='C:'
+        )
+      )
+
+      LET parse_task(OSPath, Name, Mtime, Size) = SELECT
+        OSPath,
+        Name,
+        Mtime,
+        Size,
+        utf16(string=Data) AS TaskText,
+        parse_xml(
+          accessor="data",
+          file=regex_replace(
+            source=utf16(string=Data),
+            re='<[?].+?>',
+            replace=''
+          )
+        ) AS XML
+      FROM read_file(filenames=OSPath)
+
+      LET task_files = SELECT
+        OSPath,
+        Name,
+        Mtime,
+        Size
+      FROM glob(globs=TasksPath)
+      WHERE NOT IsDir
+        AND Name =~ TaskNameRegex
+
+      LET parsed_tasks = SELECT
+        OSPath AS TaskFilePath,
+        Name AS TaskFileName,
+        Mtime AS TaskFileMtime,
+        Size AS TaskFileSize,
+        if(
+          condition=XML.Task.RegistrationInfo.URI,
+          then=XML.Task.RegistrationInfo.URI,
+          else=Name
+        ) AS TaskName,
+        XML.Task.RegistrationInfo.Description AS Description,
+        XML.Task.RegistrationInfo.Author AS Author,
+        timestamp(epoch=XML.Task.RegistrationInfo.Date) AS RegistrationTime,
+        XML.Task.Principals.Principal.UserId AS UserId,
+        XML.Task.Principals.Principal.RunLevel AS RunLevel,
+        XML.Task.Principals.Principal.LogonType AS LogonType,
+        XML.Task.Settings.Enabled AS Enabled,
+        XML.Task.Settings.Hidden AS Hidden,
+        XML.Task.Actions.Context AS ActionContext,
+        timestamp(epoch=XML.Task.Triggers.CalendarTrigger.StartBoundary) AS StartBoundary,
+        XML,
+        TaskText
+      FROM foreach(
+        row=task_files,
+        query={
+          SELECT *
+          FROM parse_task(OSPath=OSPath, Name=Name, Mtime=Mtime, Size=Size)
+        }
+      )
+
+      LET exec_actions = SELECT
+        TaskName,
+        TaskFilePath,
+        TaskFileName,
+        TaskFileMtime,
+        TaskFileSize,
+        Description,
+        Author,
+        RegistrationTime,
+        UserId,
+        RunLevel,
+        LogonType,
+        Enabled,
+        Hidden,
+        ActionContext,
+        StartBoundary,
+        "Exec" AS ActionType,
+        XML.Task.Actions.Exec.Command AS RawCommand,
+        XML.Task.Actions.Exec.Arguments AS RawArguments,
+        XML.Task.Actions.Exec.WorkingDirectory AS WorkingDirectory,
+        "" AS ClassId,
+        "" AS ActionData,
+        if(
+          condition=XML.Task.Actions.Exec.Arguments,
+          then=XML.Task.Actions.Exec.Command + " " + XML.Task.Actions.Exec.Arguments,
+          else=XML.Task.Actions.Exec.Command
+        ) AS ActionCommandLine
+      FROM parsed_tasks
+      WHERE XML.Task.Actions.Exec.Command
+         OR XML.Task.Actions.Exec.Arguments
+         OR XML.Task.Actions.Exec.WorkingDirectory
+
+      LET com_actions = SELECT
+        TaskName,
+        TaskFilePath,
+        TaskFileName,
+        TaskFileMtime,
+        TaskFileSize,
+        Description,
+        Author,
+        RegistrationTime,
+        UserId,
+        RunLevel,
+        LogonType,
+        Enabled,
+        Hidden,
+        ActionContext,
+        StartBoundary,
+        "ComHandler" AS ActionType,
+        "" AS RawCommand,
+        "" AS RawArguments,
+        "" AS WorkingDirectory,
+        XML.Task.Actions.ComHandler.ClassId AS ClassId,
+        XML.Task.Actions.ComHandler.Data AS ActionData,
+        "" AS ActionCommandLine
+      FROM parsed_tasks
+      WHERE XML.Task.Actions.ComHandler.ClassId
+         OR XML.Task.Actions.ComHandler.Data
+
+      LET action_rows = SELECT *
+      FROM chain(
+        exec=exec_actions,
+        com=com_actions
+      )
+
+      LET enriched_step1 = SELECT
+        TaskName,
+        TaskFilePath,
+        TaskFileName,
+        TaskFileMtime,
+        TaskFileSize,
+        Description,
+        Author,
+        RegistrationTime,
+        UserId,
+        RunLevel,
+        LogonType,
+        Enabled,
+        Hidden,
+        ActionContext,
+        StartBoundary,
+        ActionType,
+        RawCommand,
+        RawArguments,
+        WorkingDirectory,
+        ClassId,
+        ActionData,
+        ActionCommandLine,
+        if(
+          condition=ActionType = "Exec",
+          then=_NormalizeExecutable(Command=RawCommand, WorkingDirectory=WorkingDirectory)
+        ) AS PayloadPath
+      FROM action_rows
+
+      LET enriched_step2 = SELECT
+        TaskName,
+        TaskFilePath,
+        TaskFileName,
+        TaskFileMtime,
+        TaskFileSize,
+        Description,
+        Author,
+        RegistrationTime,
+        UserId,
+        RunLevel,
+        LogonType,
+        Enabled,
+        Hidden,
+        ActionContext,
+        StartBoundary,
+        ActionType,
+        RawCommand,
+        RawArguments,
+        WorkingDirectory,
+        ClassId,
+        ActionData,
+        ActionCommandLine,
+        PayloadPath,
+        if(
+          condition=PayloadPath,
+          then={
+            SELECT
+              Size,
+              Btime,
+              Ctime,
+              Mtime,
+              Atime,
+              Mode.String AS Mode
+            FROM stat(filename=PayloadPath, accessor="auto")
+          }
+        ) AS PayloadFileInfo
+      FROM enriched_step1
+
+      SELECT
+        TaskName,
+        TaskFilePath,
+        TaskFileName,
+        TaskFileMtime,
+        TaskFileSize,
+        Description,
+        Author,
+        RegistrationTime,
+        UserId,
+        RunLevel,
+        LogonType,
+        Enabled,
+        Hidden,
+        ActionContext,
+        StartBoundary,
+        ActionType,
+        RawCommand,
+        RawArguments,
+        WorkingDirectory,
+        ClassId,
+        ActionData,
+        ActionCommandLine,
+        PayloadPath,
+        PayloadFileInfo,
+        if(
+          condition=CalculateHashes AND PayloadPath AND PayloadFileInfo,
+          then=hash(path=PayloadPath, accessor="auto").SHA256
+        ) AS SHA256,
+        if(
+          condition=CertificateInfo AND PayloadPath AND PayloadFileInfo,
+          then=authenticode(filename=PayloadPath)
+        ) AS SignatureInfo,
+        if(
+          condition=ActionType = "Exec" AND PayloadPath AND NOT PayloadFileInfo,
+          then="Referenced payload not found on disk image"
+        ) AS Note
+      FROM enriched_step2
+      ORDER BY TaskName
+
+column_types:
+  - name: TaskFileMtime
+    type: timestamp
+  - name: RegistrationTime
+    type: timestamp
+  - name: StartBoundary
+    type: timestamp
+  - name: PayloadFileInfo
+    type: collapsed
+  - name: SignatureInfo
+    type: collapsed
