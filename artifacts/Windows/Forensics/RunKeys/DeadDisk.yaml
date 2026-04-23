@@ -508,3 +508,11 @@ sources:
         CertInfo
       FROM run_step4
       ORDER BY User
+
+column_types:
+  - name: LastKeyWrite
+    type: timestamp
+  - name: HashInfo
+    type: collapsed
+  - name: CertInfo
+    type: collapsed
