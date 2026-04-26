@@ -1,0 +1,730 @@
+name: Windows.Forensics.LogonPoints.DeadDisk
+description: |
+  Enumerate practical logon-related persistence points from an offline Windows disk.
+
+  This artifact is designed for dead disk DFIR triage and focuses on
+  persistence points commonly surfaced by Autoruns but not already covered by
+  Windows.Forensics.RunKeys.DeadDisk.
+
+  Current version provides:
+  - Policies\Explorer\Run
+  - RunOnceEx
+  - Terminal Server Install Run / RunOnce / RunOnceEx
+  - UserInitMprLogonScript
+  - Active Setup StubPath
+  - Startup folder files and shortcuts
+
+  Notes:
+  - This artifact intentionally avoids duplicating basic Run / RunOnce coverage
+    already implemented in Windows.Forensics.RunKeys.DeadDisk.
+  - ResolvedPath is a conservative investigation path and may represent a
+    launcher executable rather than the final payload.
+  - Active Setup and RunOnceEx coverage is registry-focused; complex staged
+    child execution can still require follow-up analysis.
+  - Group Policy script keys and Winlogon-specific entries are not included in
+    this version and should be handled by separate artifacts when needed.
+
+type: CLIENT
+
+precondition: |
+  SELECT OS
+  FROM info()
+  WHERE OS = "windows"
+
+parameters:
+  - name: UserHiveGlobs
+    default: C:\Users\*\NTUSER.DAT
+
+  - name: SoftwareHivePath
+    default: C:\Windows\System32\config\SOFTWARE
+
+  - name: SystemHivePath
+    default: C:\Windows\System32\config\SYSTEM
+
+  - name: ControlSet
+    description: "Optional override for HKLM environment-backed locations"
+    default: ""
+
+  - name: StartupFolderGlobs
+    type: csv
+    default: |
+      FileGlobs
+      C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\**
+      C:\Users\*\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\StartUp\**
+
+  - name: CalculateHashes
+    type: bool
+    default: Y
+
+  - name: CertificateInfo
+    type: bool
+    default: Y
+
+export: |
+  LET _ExpandedTransforms <= dict(
+    `^\\\\SystemRoot\\\\`='"%SystemRoot%\\',
+    `^system32\\\\`='"%SystemRoot%\\System32\\',
+    `^{.+}.+`='\\$0',
+    `^.:\\\\Program Files[^\\\\]*\\\\[^ ]+`='"$0"',
+    `^%[^ ]+%[^ ]+`='"$0"'
+  )
+
+  LET _NormalizeExecutable(Command, WorkingDirectory) = if(
+    condition=Command,
+    then=regex_replace(
+      source=regex_replace(
+        source=regex_replace(
+          source=regex_replace(
+            source=regex_replace(
+              source=if(
+                condition=Command =~ '^[^\\\\/:]+$' AND WorkingDirectory,
+                then=WorkingDirectory + "\\" + Command,
+                else=commandline_split(
+                  command=regex_transform(source=Command, map=_ExpandedTransforms)
+                )[0]
+              ),
+              re='(?i)^%ProgramData%',
+              replace='C:\\ProgramData'
+            ),
+            re='/',
+            replace='\\'
+          ),
+          re='(?i)^(%SystemRoot%|%windir%|\\\\SystemRoot)',
+          replace='C:\\Windows'
+        ),
+        re='(?i)^system32',
+        replace='C:\\Windows\\System32'
+      ),
+      re='(?i)^%SystemDrive%',
+      replace='C:'
+    )
+  )
+
+  LET _ReadKeyValues(HivePath, Scope, User, Category, KeyPath) = SELECT
+      Category,
+      Scope,
+      User,
+      HivePath,
+      "" AS EntryPath,
+      split(sep_string="\\", string=KeyPath)[-1] AS EntryName,
+      KeyPath,
+      Mtime AS EntryMtime,
+      _key AS ValueName,
+      _value AS Command,
+      "" AS Arguments,
+      "" AS WorkingDirectory,
+      "" AS ResolvedPath,
+      "RegistryValue" AS EntryType,
+      "" AS Note
+    FROM foreach(
+      row={
+        SELECT Mtime
+        FROM glob(
+          globs=KeyPath,
+          root=pathspec(
+            DelegateAccessor="ntfs",
+            DelegatePath=HivePath
+          ),
+          accessor="raw_reg"
+        )
+      },
+      query={
+        SELECT
+          Mtime,
+          _key,
+          _value
+        FROM foreach(
+          row={
+            SELECT _value AS Row
+            FROM items(item={
+              SELECT *
+              FROM read_reg_key(
+                globs=[KeyPath],
+                root=pathspec(
+                  DelegateAccessor="ntfs",
+                  DelegatePath=HivePath
+                ),
+                accessor="raw_reg"
+              )
+            })
+          },
+          query={
+            SELECT
+              Mtime,
+              _key,
+              _value
+            FROM items(item=Row)
+            WHERE _key != "Key"
+          }
+        )
+      }
+    )
+
+  LET _ReadChildKeyValues(HivePath, Scope, User, Category, BaseKey) = SELECT *
+    FROM foreach(
+      row={
+        SELECT Name
+        FROM glob(
+          globs=BaseKey + "\\*",
+          root=pathspec(
+            DelegateAccessor="ntfs",
+            DelegatePath=HivePath
+          ),
+          accessor="raw_reg"
+        )
+        WHERE Data.type =~ "Key"
+      },
+      query={
+        SELECT *
+        FROM _ReadKeyValues(
+          HivePath=HivePath,
+          Scope=Scope,
+          User=User,
+          Category=Category,
+          KeyPath=BaseKey + "\\" + Name
+        )
+      }
+    )
+
+  LET _ReadBaseAndChildKeyValues(HivePath, Scope, User, Category, BaseKey) = SELECT *
+    FROM chain(
+      root={
+        SELECT *
+        FROM _ReadKeyValues(
+          HivePath=HivePath,
+          Scope=Scope,
+          User=User,
+          Category=Category,
+          KeyPath=BaseKey
+        )
+      },
+      child={
+        SELECT *
+        FROM _ReadChildKeyValues(
+          HivePath=HivePath,
+          Scope=Scope,
+          User=User,
+          Category=Category,
+          BaseKey=BaseKey
+        )
+      }
+    )
+
+  LET _ReadActiveSetup(HivePath, Scope, BaseKey) = SELECT
+      "ActiveSetup" AS Category,
+      Scope,
+      "" AS User,
+      HivePath,
+      "" AS EntryPath,
+      Name AS EntryName,
+      BaseKey + "\\" + Name AS KeyPath,
+      Mtime AS EntryMtime,
+      "StubPath" AS ValueName,
+      StubPath AS Command,
+      "" AS Arguments,
+      "" AS WorkingDirectory,
+      "" AS ResolvedPath,
+      "RegistryComponent" AS EntryType,
+      if(
+        condition=ComponentID OR Version OR IsInstalled,
+        then=format(
+          format="ComponentID=%v Version=%v IsInstalled=%v",
+          args=[ComponentID, Version, IsInstalled]
+        )
+      ) AS Note
+    FROM foreach(
+      row={
+        SELECT Name, Mtime
+        FROM glob(
+          globs=BaseKey + "\\*",
+          root=pathspec(
+            DelegateAccessor="ntfs",
+            DelegatePath=HivePath
+          ),
+          accessor="raw_reg"
+        )
+        WHERE Data.type =~ "Key"
+      },
+      query={
+        SELECT
+          Name,
+          Mtime,
+          {
+            SELECT StubPath
+            FROM read_reg_key(
+              globs=[BaseKey + "\\" + Name],
+              root=pathspec(
+                DelegateAccessor="ntfs",
+                DelegatePath=HivePath
+              ),
+              accessor="raw_reg"
+            )
+          } AS StubPath,
+          {
+            SELECT ComponentID
+            FROM read_reg_key(
+              globs=[BaseKey + "\\" + Name],
+              root=pathspec(
+                DelegateAccessor="ntfs",
+                DelegatePath=HivePath
+              ),
+              accessor="raw_reg"
+            )
+          } AS ComponentID,
+          {
+            SELECT Version
+            FROM read_reg_key(
+              globs=[BaseKey + "\\" + Name],
+              root=pathspec(
+                DelegateAccessor="ntfs",
+                DelegatePath=HivePath
+              ),
+              accessor="raw_reg"
+            )
+          } AS Version,
+          {
+            SELECT IsInstalled
+            FROM read_reg_key(
+              globs=[BaseKey + "\\" + Name],
+              root=pathspec(
+                DelegateAccessor="ntfs",
+                DelegatePath=HivePath
+              ),
+              accessor="raw_reg"
+            )
+          } AS IsInstalled
+        FROM scope()
+        WHERE StubPath
+      }
+    )
+
+sources:
+  - name: Analysis
+    query: |
+      LET user_hives = SELECT
+        OSPath AS HivePath,
+        OSPath[2] AS User
+      FROM glob(globs=UserHiveGlobs)
+
+      LET current_controlset_row = SELECT Current
+      FROM read_reg_key(
+        globs=["Select"],
+        root=pathspec(DelegatePath=SystemHivePath),
+        accessor="raw_reg"
+      )
+
+      LET resolved_controlset = SELECT
+        if(
+          condition=ControlSet,
+          then=ControlSet,
+          else=format(format="ControlSet%03d", args=Current)
+        ) AS ControlSetName
+      FROM current_controlset_row
+
+      LET machine_policy_run = SELECT *
+      FROM _ReadKeyValues(
+        HivePath=SoftwareHivePath,
+        Scope="HKLM",
+        User="",
+        Category="PoliciesExplorerRun",
+        KeyPath="Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer\\Run"
+      )
+
+      LET machine_runonceex = SELECT *
+      FROM chain(
+        native={
+          SELECT *
+          FROM _ReadBaseAndChildKeyValues(
+            HivePath=SoftwareHivePath,
+            Scope="HKLM",
+            User="",
+            Category="RunOnceEx",
+            BaseKey="Microsoft\\Windows\\CurrentVersion\\RunOnceEx"
+          )
+        },
+        wow64={
+          SELECT *
+          FROM _ReadBaseAndChildKeyValues(
+            HivePath=SoftwareHivePath,
+            Scope="HKLM",
+            User="",
+            Category="RunOnceEx",
+            BaseKey="Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\RunOnceEx"
+          )
+        }
+      )
+
+      LET machine_terminal_server = SELECT *
+      FROM chain(
+        run={
+          SELECT *
+          FROM _ReadKeyValues(
+            HivePath=SoftwareHivePath,
+            Scope="HKLM",
+            User="",
+            Category="TerminalServerInstallRun",
+            KeyPath="Microsoft\\Windows NT\\CurrentVersion\\Terminal Server\\Install\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+          )
+        },
+        runonce={
+          SELECT *
+          FROM _ReadKeyValues(
+            HivePath=SoftwareHivePath,
+            Scope="HKLM",
+            User="",
+            Category="TerminalServerInstallRunOnce",
+            KeyPath="Microsoft\\Windows NT\\CurrentVersion\\Terminal Server\\Install\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce"
+          )
+        },
+        runonceex={
+          SELECT *
+          FROM _ReadBaseAndChildKeyValues(
+            HivePath=SoftwareHivePath,
+            Scope="HKLM",
+            User="",
+            Category="TerminalServerInstallRunOnceEx",
+            BaseKey="Microsoft\\Windows NT\\CurrentVersion\\Terminal Server\\Install\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnceEx"
+          )
+        }
+      )
+
+      LET machine_userinit_mpr = SELECT *
+      FROM foreach(
+        row=resolved_controlset,
+        query={
+          SELECT *
+          FROM _ReadKeyValues(
+            HivePath=SystemHivePath,
+            Scope="HKLM",
+            User="",
+            Category="UserInitMprLogonScript",
+            KeyPath=ControlSetName + "\\Control\\Session Manager\\Environment"
+          )
+          WHERE ValueName = "UserInitMprLogonScript"
+        }
+      )
+
+      LET machine_active_setup = SELECT *
+      FROM chain(
+        native={
+          SELECT *
+          FROM _ReadActiveSetup(
+            HivePath=SoftwareHivePath,
+            Scope="HKLM",
+            BaseKey="Microsoft\\Active Setup\\Installed Components"
+          )
+        },
+        wow64={
+          SELECT *
+          FROM _ReadActiveSetup(
+            HivePath=SoftwareHivePath,
+            Scope="HKLM",
+            BaseKey="Wow6432Node\\Microsoft\\Active Setup\\Installed Components"
+          )
+        }
+      )
+
+      LET user_policy_run = SELECT *
+      FROM foreach(
+        row=user_hives,
+        query={
+          SELECT *
+          FROM _ReadKeyValues(
+            HivePath=HivePath,
+            Scope="HKCU",
+            User=User,
+            Category="PoliciesExplorerRun",
+            KeyPath="Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer\\Run"
+          )
+        }
+      )
+
+      LET user_runonceex = SELECT *
+      FROM foreach(
+        row=user_hives,
+        query={
+          SELECT *
+          FROM chain(
+            native={
+              SELECT *
+              FROM _ReadBaseAndChildKeyValues(
+                HivePath=HivePath,
+                Scope="HKCU",
+                User=User,
+                Category="RunOnceEx",
+                BaseKey="Software\\Microsoft\\Windows\\CurrentVersion\\RunOnceEx"
+              )
+            },
+            wow64={
+              SELECT *
+              FROM _ReadBaseAndChildKeyValues(
+                HivePath=HivePath,
+                Scope="HKCU",
+                User=User,
+                Category="RunOnceEx",
+                BaseKey="Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\RunOnceEx"
+              )
+            }
+          )
+        }
+      )
+
+      LET user_terminal_server = SELECT *
+      FROM foreach(
+        row=user_hives,
+        query={
+          SELECT *
+          FROM chain(
+            run={
+              SELECT *
+              FROM _ReadKeyValues(
+                HivePath=HivePath,
+                Scope="HKCU",
+                User=User,
+                Category="TerminalServerInstallRun",
+                KeyPath="Software\\Microsoft\\Windows NT\\CurrentVersion\\Terminal Server\\Install\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+              )
+            },
+            runonce={
+              SELECT *
+              FROM _ReadKeyValues(
+                HivePath=HivePath,
+                Scope="HKCU",
+                User=User,
+                Category="TerminalServerInstallRunOnce",
+                KeyPath="Software\\Microsoft\\Windows NT\\CurrentVersion\\Terminal Server\\Install\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce"
+              )
+            },
+            runonceex={
+              SELECT *
+              FROM _ReadBaseAndChildKeyValues(
+                HivePath=HivePath,
+                Scope="HKCU",
+                User=User,
+                Category="TerminalServerInstallRunOnceEx",
+                BaseKey="Software\\Microsoft\\Windows NT\\CurrentVersion\\Terminal Server\\Install\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnceEx"
+              )
+            }
+          )
+        }
+      )
+
+      LET user_userinit_mpr = SELECT *
+      FROM foreach(
+        row=user_hives,
+        query={
+          SELECT *
+          FROM _ReadKeyValues(
+            HivePath=HivePath,
+            Scope="HKCU",
+            User=User,
+            Category="UserInitMprLogonScript",
+            KeyPath="Environment"
+          )
+          WHERE ValueName = "UserInitMprLogonScript"
+        }
+      )
+
+      LET startup_non_lnk = SELECT
+        "StartupFolder" AS Category,
+        "FileSystem" AS Scope,
+        parse_string_with_regex(
+          regex='(?i)^.:\\\\Users\\\\([^\\\\]+)',
+          string=format(format="%v", args=OSPath)
+        ).g1 || "AllUsers" AS User,
+        "" AS HivePath,
+        OSPath AS EntryPath,
+        Name AS EntryName,
+        "" AS KeyPath,
+        "" AS ValueName,
+        format(format="%v", args=OSPath) AS Command,
+        "" AS Arguments,
+        "" AS WorkingDirectory,
+        format(format="%v", args=OSPath) AS ResolvedPath,
+        Mtime AS EntryMtime,
+        "StartupFile" AS EntryType,
+        "" AS Note
+      FROM glob(globs=StartupFolderGlobs.FileGlobs)
+      WHERE NOT IsDir
+        AND NOT Name =~ '(?i)^desktop\.ini$'
+        AND NOT Name =~ '(?i)\.lnk$'
+
+      LET startup_lnk = SELECT
+        "StartupFolder" AS Category,
+        "FileSystem" AS Scope,
+        parse_string_with_regex(
+          regex='(?i)^.:\\\\Users\\\\([^\\\\]+)',
+          string=format(format="%v", args=OSPath)
+        ).g1 || "AllUsers" AS User,
+        "" AS HivePath,
+        OSPath AS EntryPath,
+        Name AS EntryName,
+        "" AS KeyPath,
+        "" AS ValueName,
+        LinkCommand AS Command,
+        LinkArguments AS Arguments,
+        LinkWorkingDir AS WorkingDirectory,
+        LinkResolvedPath AS ResolvedPath,
+        Mtime AS EntryMtime,
+        "StartupShortcut" AS EntryType,
+        if(
+          condition=NOT LinkResolvedPath,
+          then="Startup shortcut target could not be resolved"
+        ) AS Note
+      FROM foreach(
+        row={
+          SELECT OSPath, Name, Mtime
+          FROM glob(globs=StartupFolderGlobs.FileGlobs)
+          WHERE NOT IsDir
+            AND NOT Name =~ '(?i)^desktop\.ini$'
+            AND Name =~ '(?i)\.lnk$'
+        },
+        query={
+          SELECT
+            OSPath,
+            Name,
+            Mtime,
+            LinkTarget.LinkTarget AS LinkTargetPath,
+            StringData.TargetPath AS LinkTargetString,
+            StringData.Arguments AS LinkArguments,
+            StringData.WorkingDir AS LinkWorkingDir,
+            if(
+              condition=LinkTarget.LinkTarget,
+              then=LinkTarget.LinkTarget,
+              else=StringData.TargetPath
+            ) AS LinkCommand,
+            if(
+              condition=LinkTarget.LinkTarget,
+              then=LinkTarget.LinkTarget,
+              else=if(
+                condition=StringData.TargetPath,
+                then=StringData.TargetPath,
+                else=if(
+                  condition=StringData.RelativePath AND StringData.WorkingDir,
+                  then=StringData.WorkingDir + "\\" + StringData.RelativePath
+                )
+              )
+            ) AS LinkResolvedPath
+          FROM Artifact.Windows.Forensics.Lnk(TargetGlob=OSPath)
+        }
+      )
+
+      LET registry_rows = SELECT *
+      FROM chain(
+        a=machine_policy_run,
+        b=machine_runonceex,
+        c=machine_terminal_server,
+        d=machine_userinit_mpr,
+        e=machine_active_setup,
+        f=user_policy_run,
+        g=user_runonceex,
+        h=user_terminal_server,
+        i=user_userinit_mpr
+      )
+
+      LET startup_rows = SELECT *
+      FROM chain(
+        a=startup_non_lnk,
+        b=startup_lnk
+      )
+
+      LET base_rows = SELECT *
+      FROM chain(
+        a=registry_rows,
+        b=startup_rows
+      )
+
+      LET enriched_step1 = SELECT
+        Category,
+        Scope,
+        User,
+        HivePath,
+        EntryPath,
+        EntryName,
+        KeyPath,
+        ValueName,
+        Command,
+        Arguments,
+        WorkingDirectory,
+        if(
+          condition=ResolvedPath,
+          then=ResolvedPath,
+          else=_NormalizeExecutable(Command=Command, WorkingDirectory=WorkingDirectory)
+        ) AS ResolvedPath,
+        EntryMtime,
+        EntryType,
+        Note
+      FROM base_rows
+
+      LET enriched_step2 = SELECT
+        Category,
+        Scope,
+        User,
+        HivePath,
+        EntryPath,
+        EntryName,
+        KeyPath,
+        ValueName,
+        Command,
+        Arguments,
+        WorkingDirectory,
+        ResolvedPath,
+        EntryMtime,
+        EntryType,
+        if(
+          condition=ResolvedPath,
+          then={
+            SELECT
+              Size,
+              Btime,
+              Ctime,
+              Mtime,
+              Atime,
+              Mode.String AS Mode
+            FROM stat(filename=ResolvedPath, accessor="auto")
+          }
+        ) AS FileInfo,
+        Note
+      FROM enriched_step1
+
+      SELECT
+        Category,
+        Scope,
+        User,
+        HivePath,
+        EntryPath,
+        EntryName,
+        KeyPath,
+        ValueName,
+        Command,
+        Arguments,
+        WorkingDirectory,
+        ResolvedPath,
+        EntryMtime,
+        EntryType,
+        FileInfo,
+        if(
+          condition=CalculateHashes AND ResolvedPath AND FileInfo,
+          then=hash(path=ResolvedPath, accessor="auto")
+        ) AS HashInfo,
+        if(
+          condition=CertificateInfo AND ResolvedPath AND FileInfo,
+          then=authenticode(filename=ResolvedPath)
+        ) AS CertInfo,
+        if(
+          condition=ResolvedPath AND NOT FileInfo,
+          then=Note || " Referenced payload not found on disk image",
+          else=Note
+        ) AS Note
+      FROM enriched_step2
+      ORDER BY Category
+
+column_types:
+  - name: EntryMtime
+    type: timestamp
+  - name: FileInfo
+    type: collapsed
+  - name: HashInfo
+    type: collapsed
+  - name: CertInfo
+    type: collapsed
