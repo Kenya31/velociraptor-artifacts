@@ -120,6 +120,43 @@ Detects Scheduled Task persistence from offline task XML files.
 
 ---
 
+### 4. Windows.Forensics.LogonPoints.DeadDisk
+
+Enumerates practical logon-related persistence points from offline Windows hives and startup folders.
+
+#### Key Features
+
+- Focuses on Autoruns-style logon coverage not already handled by `RunKeys.DeadDisk`
+- Supports:
+  - `Policies\Explorer\Run`
+  - `RunOnceEx`
+  - `Terminal Server Install` Run / RunOnce / RunOnceEx
+  - `UserInitMprLogonScript`
+  - `Active Setup` `StubPath`
+  - startup folder files and shortcuts
+- Works directly on:
+  - `SOFTWARE` hive
+  - `SYSTEM` hive
+  - `NTUSER.DAT`
+  - `C:\ProgramData\...\Startup`
+  - `C:\Users\*\...\Startup`
+- One registry value or startup item per row
+- Enriches results with:
+  - file metadata
+  - file hash
+  - Authenticode information when available
+
+#### Notes
+
+- This artifact intentionally does not duplicate classic `Run` / `RunOnce` coverage.
+- `ResolvedPath` is conservative and may represent a launcher executable instead of a final payload.
+- `RunOnceEx` style keys can include metadata values such as `Title`; these are returned as registry data rather than suppressed.
+- Current version does not include:
+  - Group Policy script registry trees
+  - `Winlogon`-specific entries such as `Shell` and `Userinit`
+
+---
+
 ## Parameters (RunKeys)
 
 | Name              | Description |
@@ -138,6 +175,20 @@ Detects Scheduled Task persistence from offline task XML files.
 | `TasksPath` | Path pattern for task XML files |
 | `TaskNameRegex` | Filter task names |
 | `CalculateHashes` | Enable SHA256 calculation |
+| `CertificateInfo` | Enable Authenticode collection |
+
+---
+
+## Parameters (LogonPoints)
+
+| Name | Description |
+|------|-------------|
+| `UserHiveGlobs` | Path pattern for NTUSER.DAT |
+| `SoftwareHivePath` | Path to SOFTWARE hive |
+| `SystemHivePath` | Path to SYSTEM hive |
+| `ControlSet` | Optional ControlSet override |
+| `StartupFolderGlobs` | Startup folder glob list |
+| `CalculateHashes` | Enable hash calculation |
 | `CertificateInfo` | Enable Authenticode collection |
 
 ---
@@ -168,6 +219,15 @@ SELECT * FROM Windows.Forensics.ScheduledTasks.DeadDisk(
 )
 ```
 
+### LogonPoints
+
+```vql
+SELECT * FROM Windows.Forensics.LogonPoints.DeadDisk(
+  SoftwareHivePath="C:/Windows/System32/config/SOFTWARE",
+  SystemHivePath="C:/Windows/System32/config/SYSTEM"
+)
+```
+
 ---
 
 ### Examples
@@ -193,5 +253,6 @@ These artifacts are designed with the following principles:
 ### Future Work
 
 - WMI persistence
-- Startup folders
+- Winlogon-specific persistence
+- Group Policy script persistence
 - Improved command-line parsing (LOLBins / script execution)
