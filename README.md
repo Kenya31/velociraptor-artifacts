@@ -157,6 +157,36 @@ Enumerates practical logon-related persistence points from offline Windows hives
 
 ---
 
+### 5. Windows.Forensics.WMI.DeadDisk
+
+Enumerates observable WMI repository evidence from an offline Windows disk image.
+
+#### Key Features
+
+- Reads WMI repository files directly from:
+  - `C:\Windows\System32\wbem\Repository\OBJECTS.DATA`
+  - `C:\Windows\System32\wbem\Repository\INDEX.BTR`
+  - `C:\Windows\System32\wbem\Repository\MAPPING*.MAP`
+  - `C:\Windows\System32\wbem\Repository\RECOVER.BTR`
+  - `C:\Windows\System32\wbem\Repository\FS\**`
+- Does not rely on:
+  - live WMI APIs
+  - registry-only assumptions about WMI persistence
+- Provides:
+  - repository file inventory
+  - SHA256 enrichment
+  - observed WMI-related strings
+  - hit offsets
+  - readable context around matched strings
+
+#### Notes
+
+- This artifact reports observed facts only.
+- It does not reconstruct `__EventFilter`, `__EventConsumer`, or `__FilterToConsumerBinding` relationships.
+- Full WMI subscription reconstruction requires a dedicated WMI repository parser.
+
+---
+
 ## Parameters (RunKeys)
 
 | Name              | Description |
@@ -190,6 +220,19 @@ Enumerates practical logon-related persistence points from offline Windows hives
 | `StartupFolderGlobs` | Startup folder glob list |
 | `CalculateHashes` | Enable hash calculation |
 | `CertificateInfo` | Enable Authenticode collection |
+
+---
+
+## Parameters (WMI)
+
+| Name | Description |
+|------|-------------|
+| `WMIRepositoryGlobs` | Path patterns for WMI repository files |
+| `ScanRepositoryStrings` | Enable YARA string scanning |
+| `CalculateHashes` | Enable SHA256 calculation |
+| `NumberOfHits` | Maximum YARA hits per repository file |
+| `ContextBytes` | Context bytes around each YARA hit |
+| `WMIYaraRule` | YARA rule for observable WMI strings |
 
 ---
 
@@ -228,6 +271,12 @@ SELECT * FROM Windows.Forensics.LogonPoints.DeadDisk(
 )
 ```
 
+### WMI
+
+```vql
+SELECT * FROM Windows.Forensics.WMI.DeadDisk()
+```
+
 ---
 
 ### Examples
@@ -252,7 +301,7 @@ These artifacts are designed with the following principles:
 
 ### Future Work
 
-- WMI persistence
 - Winlogon-specific persistence
 - Group Policy script persistence
+- WMI repository parser integration for full subscription reconstruction
 - Improved command-line parsing (LOLBins / script execution)
