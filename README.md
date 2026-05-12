@@ -159,7 +159,7 @@ Enumerates practical logon-related persistence points from offline Windows hives
 
 ### 5. Windows.Forensics.WMI.DeadDisk
 
-Enumerates observable WMI repository evidence from an offline Windows disk image.
+Enumerates carved WMI permanent event subscription evidence from an offline Windows disk image.
 
 #### Key Features
 
@@ -173,16 +173,19 @@ Enumerates observable WMI repository evidence from an offline Windows disk image
   - live WMI APIs
   - registry-only assumptions about WMI persistence
 - Provides:
+  - carved `FilterToConsumerBinding` relationship rows
+  - consumer name and type
+  - filter name and query when recoverable
+  - evidence text for analyst review
   - repository file inventory
   - SHA256 enrichment
-  - observed WMI-related strings
-  - hit offsets
-  - readable context around matched strings
+  - raw observed WMI-related strings as fallback triage evidence
 
 #### Notes
 
-- This artifact reports observed facts only.
-- It does not reconstruct `__EventFilter`, `__EventConsumer`, or `__FilterToConsumerBinding` relationships.
+- This artifact reports carved repository facts only.
+- `CarvedBindings` is the primary source for Autoruns-like review.
+- `ObservedWMIStrings` is fallback triage evidence, not final persistence attribution.
 - Full WMI subscription reconstruction requires a dedicated WMI repository parser.
 
 ---
@@ -227,7 +230,13 @@ Enumerates observable WMI repository evidence from an offline Windows disk image
 
 | Name | Description |
 |------|-------------|
+| `WMIObjectsDataGlobs` | Path patterns for `OBJECTS.DATA` files used by binding carving |
 | `WMIRepositoryGlobs` | Path patterns for WMI repository files |
+| `CarveBindings` | Enable carved `FilterToConsumerBinding` relationship output |
+| `BindingRecordRegex` | YARA rule for finding binding records |
+| `BindingContextBytes` | Context bytes around each binding hit |
+| `BindingHitsPerFile` | Maximum binding hits per repository file |
+| `EvidenceTextBytes` | Maximum evidence text bytes shown per carved binding |
 | `ScanRepositoryStrings` | Enable YARA string scanning |
 | `CalculateHashes` | Enable SHA256 calculation |
 | `NumberOfHits` | Maximum YARA hits per repository file |

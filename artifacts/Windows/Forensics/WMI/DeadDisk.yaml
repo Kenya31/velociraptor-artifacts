@@ -1,21 +1,28 @@
 name: Windows.Forensics.WMI.DeadDisk
 description: |
-  Enumerate observable WMI repository evidence from an offline Windows disk image.
+  Enumerate carved WMI permanent event subscription evidence from an offline
+  Windows disk image.
 
   This artifact is designed for dead disk DFIR workflows. It does not depend on
-  live WMI APIs and does not pretend to fully parse the WMI repository. Instead
-  it provides:
+  live WMI APIs. It carves the offline WMI repository for permanent event
+  subscription evidence and presents the result in an Autoruns-like way:
+  what trigger appears to be bound to what consumer action.
+
+  It provides:
+  - carved FilterToConsumerBinding relationship rows when consumer and filter
+    names can be extracted
   - WMI repository file inventory
   - SHA256 enrichment for repository files
-  - observed WMI-related strings with file offset and readable context
+  - raw observed WMI-related strings as fallback triage evidence
 
   Notes:
-  - Permanent WMI event subscriptions are stored in the WMI repository, not in a
-    normal SOFTWARE registry tree. A full reconstruction of filters, consumers,
-    and bindings requires a dedicated WMI repository parser.
-  - This artifact reports observed facts only. It does not assign suspicion
-    priority and does not claim a persistence relationship unless the repository
-    can be parsed by a future parser.
+  - Permanent WMI event subscriptions are composed of __EventFilter,
+    __EventConsumer, and __FilterToConsumerBinding objects.
+  - Permanent subscriptions are stored in the WMI repository, not in a normal
+    SOFTWARE registry tree.
+  - This artifact uses conservative carving, not a full CIM repository parser.
+    Rows should be treated as carved repository evidence and reviewed with the
+    included evidence text.
 
 type: CLIENT
 
@@ -25,6 +32,13 @@ precondition: |
   WHERE OS = "windows"
 
 parameters:
+  - name: WMIObjectsDataGlobs
+    type: csv
+    default: |
+      FileGlobs
+      C:\Windows\System32\wbem\Repository\OBJECTS.DATA
+      C:\Windows\System32\wbem\Repository\FS\OBJECTS.DATA
+
   - name: WMIRepositoryGlobs
     type: csv
     default: |
@@ -34,6 +48,33 @@ parameters:
       C:\Windows\System32\wbem\Repository\MAPPING*.MAP
       C:\Windows\System32\wbem\Repository\RECOVER.BTR
       C:\Windows\System32\wbem\Repository\FS\**
+
+  - name: CarveBindings
+    type: bool
+    default: Y
+
+  - name: BindingRecordRegex
+    type: yara
+    default: |
+      rule WMI_FilterToConsumerBinding_Record {
+        strings:
+          $BindingAscii = "_FilterToConsumerBinding" ascii nocase
+          $BindingWide = "_FilterToConsumerBinding" wide nocase
+        condition:
+          any of them
+      }
+
+  - name: BindingContextBytes
+    type: int
+    default: 4096
+
+  - name: BindingHitsPerFile
+    type: int
+    default: 200
+
+  - name: EvidenceTextBytes
+    type: int
+    default: 2000
 
   - name: ScanRepositoryStrings
     type: bool
@@ -79,6 +120,126 @@ parameters:
       }
 
 sources:
+  - name: CarvedBindings
+    query: |
+      LET object_files = SELECT
+        OSPath,
+        Name,
+        Size,
+        Btime,
+        Ctime,
+        Mtime,
+        Atime,
+        Mode.String AS Mode
+      FROM glob(globs=WMIObjectsDataGlobs.FileGlobs)
+      WHERE NOT IsDir
+        AND NOT IsLink
+
+      LET records = SELECT *
+      FROM foreach(
+        row=object_files,
+        query={
+          SELECT
+            OSPath AS SourceFile,
+            Name AS SourceName,
+            Size AS SourceSize,
+            Btime,
+            Ctime,
+            Mtime,
+            Atime,
+            Mode,
+            String.Offset AS HitOffset,
+            regex_replace(
+              source=str(str=String.Data),
+              re='[^ -~]',
+              replace=''
+            ) AS CleanContext,
+            parse_string_with_regex(
+              string=str(str=String.Data),
+              regex=[
+                '(?i)((?P<ConsumerNamespace>[^:]{1,200}):)?(?P<ConsumerType>[A-Za-z0-9_]*EventConsumer)\\.Name="(?P<ConsumerName>[^"]+)"',
+                '(?i)((?P<FilterNamespace>[^:]{1,200}):)?_{1,2}EventFilter\\.Name="(?P<FilterName>[^"]+)"'
+              ]
+            ) AS Parsed
+          FROM yara(
+            rules=BindingRecordRegex,
+            files=OSPath,
+            context=BindingContextBytes,
+            number=BindingHitsPerFile
+          )
+        }
+      )
+
+      LET parsed_rows = SELECT
+        SourceFile,
+        SourceName,
+        SourceSize,
+        Btime,
+        Ctime,
+        Mtime,
+        Atime,
+        Mode,
+        HitOffset,
+        Parsed.ConsumerNamespace AS ConsumerNamespace,
+        Parsed.ConsumerType AS ConsumerType,
+        Parsed.ConsumerName AS ConsumerName,
+        Parsed.FilterNamespace AS FilterNamespace,
+        Parsed.FilterName AS FilterName,
+        parse_string_with_regex(
+          string=CleanContext,
+          regex=[
+            '(?i)(?P<FilterQuery>select\\s+.{1,500}?)(WQL|CommandLineEventConsumer|ActiveScriptEventConsumer|LogFileEventConsumer|NTEventLogEventConsumer|SMTPEventConsumer|$)'
+          ]
+        ).FilterQuery AS FilterQuery,
+        parse_string_with_regex(
+          string=CleanContext,
+          regex=[
+            '(?i)(?P<CommandOrScript>(cmd\\.exe|powershell(\\.exe)?|wscript\\.exe|cscript\\.exe|mshta\\.exe|rundll32\\.exe|regsvr32\\.exe).{0,500})'
+          ]
+        ).CommandOrScript AS CommandOrScript,
+        substr(str=CleanContext, start=0, end=EvidenceTextBytes) AS EvidenceText
+      FROM records
+      WHERE Parsed.ConsumerName
+        AND Parsed.FilterName
+
+      SELECT
+        format(
+          format="%s-%s",
+          args=[ConsumerName, FilterName]
+        ) AS BindingName,
+        ConsumerType,
+        ConsumerName,
+        ConsumerNamespace,
+        CommandOrScript,
+        FilterName,
+        FilterNamespace,
+        FilterQuery,
+        SourceFile,
+        SourceName,
+        SourceSize,
+        HitOffset,
+        Btime,
+        Ctime,
+        Mtime,
+        Atime,
+        Mode,
+        EvidenceText,
+        if(
+          condition=format(format="%s-%s", args=[ConsumerName, FilterName]) =~ '^(BVTConsumer-BVTFilter|SCM Event Log Consumer-SCM Event Log Filter)$',
+          then=TRUE,
+          else=FALSE
+        ) AS IsCommonBinding,
+        "Carved from offline WMI repository; review EvidenceText because this is not a full CIM repository parse" AS Note
+      FROM if(
+        condition=CarveBindings,
+        then=parsed_rows,
+        else={
+          SELECT * FROM scope() WHERE FALSE
+        }
+      )
+      GROUP BY BindingName, SourceFile
+      ORDER BY BindingName
+
   - name: RepositoryInventory
     query: |
       LET repo_files = SELECT
