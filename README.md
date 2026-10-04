@@ -4,7 +4,7 @@ This repository contains custom Velociraptor artifacts designed for **dead disk 
 
 These artifacts focus on improving accuracy and visibility when analyzing **offline Windows systems (disk images)** using `raw_reg` and `ntfs` accessors.
 
-取得済みのアプリケーションログを解析するArtifactも収録している。永続化などのOS調査用は`Forensics/`、製品固有のログ解析用は`Applications/`へ配置する。各Artifactの検証範囲は個別の説明を参照。
+取得済みのアプリケーションログを解析するArtifactも収録している。永続化などのOS調査用は`Forensics/`、製品固有のログ解析用は`Applications/`へ配置する。
 
 ## Repository Structure
 
@@ -220,7 +220,7 @@ AnyDeskの接続要求、ファイル転送、Chat、選択した診断イベン
 - 各出力行に元ログのパス・SHA256・行番号を保持。
 - AnyDesk 9.8.0のポータブル版で生成した保存ログと、Velociraptor 0.76.3で検証済み。実ディスクイメージのremap・インストール版・別バージョンは未検証。
 
-[Artifact定義](artifacts/Windows/Applications/AnyDesk/Trace.DeadDisk.yaml) / [入力・出力・実行方法・検証範囲](artifacts/Windows/Applications/AnyDesk/README.md)
+[Artifact定義](artifacts/Windows/Applications/AnyDesk/Trace.DeadDisk.yaml) / [入力・出力・Parameters](artifacts/Windows/Applications/AnyDesk/README.md)
 
 ---
 
