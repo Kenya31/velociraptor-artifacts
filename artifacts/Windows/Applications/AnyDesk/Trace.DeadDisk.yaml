@@ -1,0 +1,425 @@
+name: Windows.Applications.AnyDesk.Trace.DeadDisk
+description: |
+  AnyDeskの接続・転送・選択した診断イベントを、人が読める一覧へ整理する。
+  検証対象はWindows標準EXE 9.8.0のポータブル版で生成した保存ログ。
+  ConnectionSummary、LogOverview、Connections、FileTransfers、KeyEvents、ParseCoverage、
+  ReviewLines、ConfiguredTargets、FileInventoryを分け、日時だけによる
+  session/transferの自動結合は行わない。
+
+  connection_trace.txt、file_transfer_trace.txt、chat/*.txtはUTF-16LEとして読む。
+  ClipboardとFile Manager、start/finish/cancel、B/MiB表記を区別する。
+  MiBの丸め表示を正確なbyte数へ変換しない。Chatの見出し時刻は各messageの送信時刻ではない。
+  ad.traceはASCIIの既知イベントだけを解析し、非ASCII行をEncodingReviewとして
+  明示する。CP932をUTF-8とみなして日本語を壊した表示にはしない。
+  時刻はoffset不明の壁時計表記を保持し、絶対UTCへ自動変換しない。
+  LogGlobsとAccessorをmounted disk / remap / 保存コピーに合わせて指定する。
+  累積ログは最終コピー等を1組だけ指定し、全phaseを合算しない。
+  接続やfinishの記録は、不正利用・操作者の身元・受領byteの同一性を証明しない。
+type: CLIENT
+parameters:
+  - name: LogGlobs
+    type: csv
+    description: LogKindはad / connection / transfer / chat。CLIはLogKind,Glob header必須。
+    default: |
+      LogKind,Glob
+      ad,C:/Users/*/AppData/Roaming/AnyDesk/ad.trace
+      ad,C:/ProgramData/AnyDesk/ad_svc.trace
+      connection,C:/Users/*/AppData/Roaming/AnyDesk/connection_trace.txt
+      connection,C:/ProgramData/AnyDesk/connection_trace.txt
+      transfer,C:/Users/*/AppData/Roaming/AnyDesk/file_transfer_trace.txt
+      transfer,C:/ProgramData/AnyDesk/file_transfer_trace.txt
+      chat,C:/Users/*/AppData/Roaming/AnyDesk/chat/*.txt
+  - name: Accessor
+    default: auto
+    description: autoまたは適用したremapのaccessor。live APIは不要。
+  - name: MaxLogBytes
+    type: int
+    default: 8388608
+    description: file全体を読み込む上限。超過fileは解析せずCoverageへ出す。
+  - name: ConnectionLinks
+    type: csv
+    description: 原文・操作記録を確認した対応表。headerのみならcross-file結合しない。
+    default: |
+      ConnectionPath,ConnectionSHA256,ConnectionLine,SessionPath,SessionSHA256,StartLine,StopLine
+  - name: TransferLinks
+    type: csv
+    description: 確認済み接続と転送start/終端の対応表。FinishLineはfinishまたはcancel行。内容同一性の証明ではない。
+    default: |
+      ConnectionPath,ConnectionSHA256,ConnectionLine,TransferPath,TransferSHA256,StartLine,FinishLine
+export: |
+  LET FoundFiles <= SELECT LogKind, Glob AS SourceGlob, OSPath,
+      OSPath.Dirname AS Directory, Size, Mtime, Ctime, Btime, Atime
+    FROM foreach(row=LogGlobs, query={
+      SELECT LogKind, Glob, OSPath, Size, Mtime, Ctime, Btime, Atime
+      FROM glob(globs=Glob, accessor=Accessor)
+      WHERE NOT IsDir
+    })
+    GROUP BY OSPath
+
+  LET LoadedFiles <= SELECT *,
+      if(condition=Size <= MaxLogBytes AND LogKind IN ('ad', 'connection', 'transfer', 'chat'),
+         then=read_file(filename=OSPath, accessor=Accessor, length=MaxLogBytes + 1)) AS Bytes,
+      hash(path=OSPath, accessor=Accessor) AS HashInfo
+    FROM FoundFiles
+
+  LET DecodedFiles = SELECT *,
+      if(condition=LogKind = 'ad', then=Bytes,
+         else=utf16(string=Bytes)) AS Decoded
+    FROM LoadedFiles
+    WHERE Size <= MaxLogBytes AND LogKind IN ('ad', 'connection', 'transfer', 'chat')
+      AND len(list=Bytes) = Size
+
+  LET ValidFiles <= SELECT *,
+      if(condition=LogKind = 'ad', then=TRUE,
+         else=utf16_encode(string=Decoded) = Bytes) AS EncodingValid,
+      regex_replace(source=Decoded, re='''^\x{FEFF}''', replace='') AS Text
+    FROM DecodedFiles
+
+  LET RawRows = SELECT OSPath, Directory, LogKind, HashInfo,
+      _key + 1 AS SourceLine, _value AS RawLine,
+      if(condition=LogKind = 'ad', then=_value =~ '''^[\x00-\x7F]*$''', else=TRUE) AS ASCIIOnly
+    FROM foreach(row={SELECT * FROM ValidFiles WHERE EncodingValid}, query={
+      SELECT OSPath, Directory, LogKind, HashInfo, _key, _value
+      FROM items(item=split(string=Text, sep='''\r\n|\n|\r'''))
+    })
+    WHERE RawLine
+
+  LET ClassifiedRows = SELECT *,
+      if(condition=LogKind = 'connection', then=parse_string_with_regex(string=RawLine,
+        regex='''^\s*(?P<Direction>Incoming|Outgoing)\s+(?P<RawTime>\d{4}-\d{2}-\d{2}, \d{2}:\d{2})\s+(?P<Status>\S+)\s+(?P<PeerID>\d+)\s+(?P<SecondPeerField>\d+)\s*$'''),
+      else=if(condition=LogKind = 'transfer', then=parse_string_with_regex(string=RawLine,
+        regex='''^(?P<TransferMethod>File Manager|Clipboard)\s+(?P<RawTime>\d{4}-\d{2}-\d{2}, \d{2}:\d{2})\s+(?P<Status>start|finish|cancel)\s+(?P<Direction>upload|download)\s+'(?P<FileName>.*)'\s+\(~(?P<ProgressValue>\d+(?:\.\d+)?) (?P<ProgressUnit>B|MiB) out of (?P<TotalValue>\d+(?:\.\d+)?) (?P<TotalUnit>B|MiB)\)\s*$'''),
+      else=if(condition=LogKind = 'chat', then=parse_string_with_regex(string=RawLine,
+        regex=['''^------ (?P<RawTime>\d{4}-\d{2}-\d{2}, \d{2}:\d{2}) ------$''', '''^(?P<SenderLabel>[^:]+): ?(?P<ChatMessage>.*)$''']),
+      else=if(condition=ASCIIOnly, then=parse_string_with_regex(string=RawLine,
+        regex='''^\s*(?P<Level>info|warning|error|debug|fatal|auth)\s+(?P<RawTime>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\s+(?P<Process>\S+)\s+(?P<PID>\d+)\s+(?P<TID>\d+)\s+(?:(?P<Context>\d+)\s+)?(?P<Component>\S+)\s+-\s+(?P<Message>.*)$'''))))) AS Record
+    FROM RawRows
+
+  LET EventMap <= dict(
+    SessionRequest='接続要求の診断記録', SessionStarted='session開始',
+    SessionStopped='session停止', SessionClosed='session終了の診断記録',
+    AuthenticationMessage='認証の診断記録', DownloadStarted='download開始の診断記録',
+    DownloadFinished='download終了の診断記録', PreparingFiles='転送準備',
+    PreparationCompleted='転送準備完了', ProgressWarning='進捗の診断警告',
+    LocalIdentity='ローカルClient-ID', Version='version記録', InstallStatus='導入状態の診断記録',
+    ClipboardTextOffer='text offerの記録。本文・貼り付け成功は未証明',
+    ClipboardFileOffer='file offerの記録。転送完了は未証明',
+    ClipboardFileFound='clipboard file候補の記録。転送完了は未証明',
+    ClipboardFilePacketDropped='clipboard file packetを不許可で破棄した記録',
+    ClipboardFilePermission='その時点のclipboard file権限。後続の変更を確認')
+  LET EventPatterns <= dict(
+    SessionRequest='''^(Incoming session request|Session request)\b''',
+    SessionStarted='''^Session started\b''', SessionStopped='''^Session stopped\b''',
+    SessionClosed='''^Session closed (locally|by remote side):''',
+    AuthenticationMessage='''^\d+: Authenticated\b''',
+    DownloadStarted='''^Download started\b''', DownloadFinished='''^Download finished\b''',
+    PreparingFiles='''^Preparing files in ''', PreparationCompleted='''^Preparation of \d+ files completed''',
+    ProgressWarning='''^Invalid progress code''', LocalIdentity='''^New user data\. Client-ID: \d+\.''',
+    Version='''^\* Version \d+\.\d+\.\d+''', InstallStatus='''^Install status:''',
+    ClipboardTextOffer='''^(Got a text offer \(\d+ b\)\.|Relaying text offers\.)$''',
+    ClipboardFileOffer='''^Relaying file offers\.$''', ClipboardFileFound='''^Found \d+ files$''',
+    ClipboardFilePacketDropped='''^Dropped (outgoing|incoming) clipboard file packet \(disallowed\)\.$''',
+    ClipboardFilePermission='''^(Sending clipboard files \(\d+\) permissions|Updating clipboard_files permissions:|Received new clipboard_files permissions:) \(enabled (allowed|forbidden) supported\)$''')
+  LET MatchingEvent(Msg) = SELECT _key AS Name FROM items(item=EventPatterns)
+    WHERE Msg =~ _value LIMIT 1
+  LET AmountCheckedRows = SELECT *,
+      LogKind != 'transfer' OR (Record.RawTime
+        AND (Record.ProgressUnit != 'B' OR (NOT Record.ProgressValue =~ '''\.''' AND len(list=Record.ProgressValue) <= 18))
+        AND (Record.TotalUnit != 'B' OR (NOT Record.TotalValue =~ '''\.''' AND len(list=Record.TotalValue) <= 18))) AS AmountValid
+    FROM ClassifiedRows
+  LET TypedRows = SELECT *,
+      if(condition=LogKind = 'ad', then=MatchingEvent(Msg=Record.Message).Name[0],
+         else=if(condition=LogKind='chat',then=if(condition=Record.RawTime,then='ChatHeader',else=if(condition=Record.SenderLabel,then='ChatMessage')),
+         else=if(condition=LogKind='transfer' AND NOT AmountValid,then=NULL,else=LogKind))) AS EventType,
+      if(condition=LogKind = 'ad', then='Millisecond', else='Minute') AS Precision,
+      if(condition=LogKind = 'ad', then='2006-01-02 15:04:05.000', else='2006-01-02, 15:04') AS TimeFormat
+    FROM AmountCheckedRows
+
+  -- Parsing is for date validity only; this helper is never exported as absolute time.
+  LET PARSE_TZ = 'UTC'
+  LET TimeCheckedRows <= SELECT *,
+      if(condition=Record.RawTime, then=timestamp(epoch=Record.RawTime, format=TimeFormat)) AS DateCheck
+    FROM TypedRows
+  LET ParsedRows <= SELECT *, Record.RawTime AS RawTime,
+      regex_replace(source=Record.RawTime, re=',', replace='') AS EventWallTime
+    FROM TimeCheckedRows
+    WHERE Record.RawTime AND DateCheck AND EventType AND LogKind != 'chat'
+
+  LET ChatHeaders <= SELECT OSPath, SourceLine, Record.RawTime AS HeaderRawTime, DateCheck
+    FROM TimeCheckedRows WHERE LogKind='chat' AND EventType='ChatHeader'
+  LET ChatHeaderFor(Path, Line) = SELECT SourceLine, HeaderRawTime, DateCheck
+    FROM ChatHeaders WHERE OSPath=Path AND SourceLine < Line ORDER BY SourceLine DESC LIMIT 1
+  LET ChatRows = SELECT *, ChatHeaderFor(Path=OSPath,Line=SourceLine) AS Headers
+    FROM TimeCheckedRows WHERE LogKind='chat' AND EventType='ChatMessage'
+
+  LET PathKey(Path) = lowcase(string=regex_replace(source=str(str=Path), re='''\\''', replace='/'))
+  LET MinuteText(Text) = parse_string_with_regex(string=Text, regex='''^(.{16})''').g1
+  LET EvidenceRows <= SELECT dict(
+      Path=str(str=OSPath), PathKey=PathKey(Path=OSPath),
+      SHA256=lowcase(string=HashInfo.SHA256), Line=SourceLine,
+      Directory=PathKey(Path=Directory), EventType=EventType, LogKind=LogKind,
+      WallTime=EventWallTime, Minute=MinuteText(Text=EventWallTime),
+      PID=Record.PID, Process=Record.Process, Component=Record.Component,
+      Status=Record.Status, Direction=Record.Direction, PeerID=Record.PeerID,
+      FileName=Record.FileName, TransferMethod=Record.TransferMethod,
+      TotalValue=Record.TotalValue, TotalUnit=Record.TotalUnit,
+      TotalBytes=if(condition=Record.TotalUnit='B',then=int(int=Record.TotalValue))) AS Evidence
+    FROM ParsedRows
+  LET FindRef(Path, SHA256, Line, Type) = SELECT Evidence FROM EvidenceRows
+    WHERE Evidence.PathKey = PathKey(Path=Path)
+      AND Evidence.SHA256 = lowcase(string=SHA256)
+      AND Evidence.Line = int(int=Line) AND Evidence.EventType = Type
+  LET EmptyRef <= dict(Path='', PathKey='', SHA256='', Line=0, Directory='',
+      EventType='', LogKind='', WallTime='', Minute='', PID='', Process='', Component='',
+      Status='', Direction='', PeerID='', FileName='', TotalBytes='')
+  LET OneRef(Refs) = if(condition=len(list=Refs) = 1, then=Refs[0], else=EmptyRef)
+  LET ConnectionEvidence <= SELECT Evidence FROM EvidenceRows WHERE Evidence.LogKind = 'connection'
+  LET ConnectionMultiplicity(C) = SELECT Evidence FROM ConnectionEvidence
+    WHERE Evidence.PathKey = C.PathKey AND Evidence.Minute = C.Minute
+  LET BetweenBoundaries(S, E) = SELECT Evidence FROM EvidenceRows
+    WHERE Evidence.PathKey = S.PathKey AND Evidence.SHA256 = S.SHA256
+      AND Evidence.PID = S.PID AND Evidence.Process = S.Process
+      AND Evidence.Component = S.Component
+      AND Evidence.EventType IN ('SessionStarted', 'SessionStopped')
+      AND Evidence.Line > S.Line AND Evidence.Line < E.Line
+  LET LinkInputs <= SELECT *,
+      PathKey(Path=ConnectionPath) AS ConnectionKey,
+      lowcase(string=ConnectionSHA256) AS ConnectionHash,
+      int(int=ConnectionLine) AS ConnectionRow,
+      FindRef(Path=ConnectionPath, SHA256=ConnectionSHA256, Line=ConnectionLine, Type='connection').Evidence AS CRefs,
+      FindRef(Path=SessionPath, SHA256=SessionSHA256, Line=StartLine, Type='SessionStarted').Evidence AS SRefs,
+      FindRef(Path=SessionPath, SHA256=SessionSHA256, Line=StopLine, Type='SessionStopped').Evidence AS ERefs
+    FROM ConnectionLinks
+  LET ConnectionMappings(C) = SELECT ConnectionRow FROM LinkInputs
+    WHERE ConnectionKey = C.PathKey AND ConnectionHash = C.SHA256 AND ConnectionRow = C.Line
+  LET StartMappings(S) = SELECT StartLine FROM LinkInputs
+    WHERE PathKey(Path=SessionPath) = S.PathKey AND lowcase(string=SessionSHA256) = S.SHA256
+      AND int(int=StartLine) = S.Line
+  LET StopMappings(E) = SELECT StopLine FROM LinkInputs
+    WHERE PathKey(Path=SessionPath) = E.PathKey AND lowcase(string=SessionSHA256) = E.SHA256
+      AND int(int=StopLine) = E.Line
+  LET LinkRefs <= SELECT *, OneRef(Refs=CRefs) AS C, OneRef(Refs=SRefs) AS S, OneRef(Refs=ERefs) AS E
+    FROM LinkInputs
+  LET CheckedConnectionLinks <= SELECT *,
+      if(condition=len(list=CRefs) != 1, then='InvalidConnectionReference',
+      else=if(condition=len(list=ConnectionMappings(C=C).ConnectionRow) != 1, then='AmbiguousBinding',
+      else=if(condition=C.Status != 'User', then='UnsupportedConnectionStatus',
+      else=if(condition=len(list=ConnectionMultiplicity(C=C).Evidence) != 1, then='AmbiguousConnectionMinute',
+      else=if(condition=len(list=SRefs) != 1, then='InvalidStartReference',
+      else=if(condition=len(list=StartMappings(S=S).StartLine) != 1, then='ReusedStartReference',
+      else=if(condition=C.Directory != S.Directory OR C.Minute != S.Minute, then='StartContextMismatch',
+      else=if(condition=NOT StopLine, then='StartOnly',
+      else=if(condition=len(list=ERefs) != 1, then='InvalidStopReference',
+      else=if(condition=len(list=StopMappings(E=E).StopLine) != 1, then='ReusedStopReference',
+      else=if(condition=S.PathKey != E.PathKey OR S.SHA256 != E.SHA256
+          OR S.PID != E.PID OR S.Process != E.Process OR S.Component != E.Component
+          OR S.Line >= E.Line OR S.WallTime > E.WallTime, then='StopContextMismatch',
+      else=if(condition=len(list=BetweenBoundaries(S=S,E=E).Evidence) != 0, then='InterveningSessionBoundary',
+      else='LinkedStartStop')))))))))))) AS LinkStatus
+    FROM LinkRefs
+  LET LinksFor(TargetConnection) = SELECT * FROM CheckedConnectionLinks
+    WHERE ConnectionKey = TargetConnection.PathKey AND ConnectionHash = TargetConnection.SHA256 AND ConnectionRow = TargetConnection.Line
+  LET AcceptedLinks <= SELECT * FROM CheckedConnectionLinks WHERE LinkStatus IN ('LinkedStartStop', 'StartOnly')
+  LET AcceptedFor(TargetConnection) = SELECT * FROM AcceptedLinks
+    WHERE ConnectionKey = TargetConnection.PathKey AND ConnectionHash = TargetConnection.SHA256 AND ConnectionRow = TargetConnection.Line
+  LET TransferInputs <= SELECT *,
+      FindRef(Path=ConnectionPath,SHA256=ConnectionSHA256,Line=ConnectionLine,Type='connection').Evidence AS CRefs,
+      FindRef(Path=TransferPath,SHA256=TransferSHA256,Line=StartLine,Type='transfer').Evidence AS SRefs,
+      FindRef(Path=TransferPath,SHA256=TransferSHA256,Line=FinishLine,Type='transfer').Evidence AS FRefs
+    FROM TransferLinks
+  LET TransferMappings(T, Which) = SELECT StartLine FROM TransferInputs
+    WHERE PathKey(Path=TransferPath) = T.PathKey AND lowcase(string=TransferSHA256) = T.SHA256
+      AND int(int=if(condition=Which='start',then=StartLine,else=FinishLine)) = T.Line
+  LET TransferRefs <= SELECT *, OneRef(Refs=CRefs) AS C, OneRef(Refs=SRefs) AS TStart, OneRef(Refs=FRefs) AS TFinish
+    FROM TransferInputs
+  LET TransferParents <= SELECT *, AcceptedFor(TargetConnection=C).S AS ParentStarts,
+      AcceptedFor(TargetConnection=C).E AS ParentEnds, AcceptedFor(TargetConnection=C).LinkStatus AS ParentStatuses
+    FROM TransferRefs
+  LET CheckedTransferLinks <= SELECT *,
+      if(condition=len(list=CRefs) != 1, then='InvalidConnectionReference',
+      else=if(condition=len(list=ParentStatuses) != 1 OR ParentStatuses[0] != 'LinkedStartStop', then='NoCompleteReviewedSession',
+      else=if(condition=len(list=SRefs) != 1 OR len(list=FRefs) != 1, then='InvalidTransferReference',
+      else=if(condition=len(list=TransferMappings(T=TStart,Which='start').StartLine) != 1
+          OR len(list=TransferMappings(T=TFinish,Which='finish').StartLine) != 1, then='ReusedTransferReference',
+      else=if(condition=TStart.Status != 'start' OR NOT TFinish.Status IN ('finish','cancel')
+          OR TStart.PathKey != TFinish.PathKey OR TStart.SHA256 != TFinish.SHA256
+          OR TStart.Line >= TFinish.Line OR TStart.Minute > TFinish.Minute
+          OR TStart.FileName != TFinish.FileName OR TStart.Direction != TFinish.Direction
+          OR TStart.TransferMethod != TFinish.TransferMethod
+          OR TStart.TotalValue != TFinish.TotalValue OR TStart.TotalUnit != TFinish.TotalUnit
+          OR C.Directory != TStart.Directory, then='TransferContextMismatch',
+      else=if(condition=TStart.Minute < ParentStarts[0].Minute OR TFinish.Minute > ParentEnds[0].Minute,
+          then='OutsideSessionWindow', else='LinkedTransferPair')))))) AS LinkStatus
+    FROM TransferParents
+  LET AcceptedTransfers <= SELECT * FROM CheckedTransferLinks WHERE LinkStatus = 'LinkedTransferPair'
+  LET TransfersFor(TargetConnection) = SELECT TStart.FileName AS FileName, TStart.Direction AS Direction,
+      TStart.TotalBytes AS TotalBytes, TStart.TotalValue AS TotalValue, TStart.TotalUnit AS TotalUnit,
+      TStart.TransferMethod AS TransferMethod, TFinish.Status AS RecordedEndStatus,
+      TStart.WallTime AS StartWallTime, TFinish.WallTime AS FinishWallTime,
+      TStart.Path AS SourcePath, TStart.SHA256 AS SourceSHA256,
+      TStart.Line AS StartLine, TFinish.Line AS FinishLine,
+      'AnalystSuppliedAssociation' AS AssociationBasis
+    FROM AcceptedTransfers
+    WHERE C.PathKey = TargetConnection.PathKey AND C.SHA256 = TargetConnection.SHA256 AND C.Line = TargetConnection.Line
+  LET SessionUses(Ref) = SELECT LinkStatus FROM AcceptedLinks
+    WHERE (S.PathKey = Ref.PathKey AND S.SHA256 = Ref.SHA256 AND S.Line = Ref.Line)
+       OR (LinkStatus='LinkedStartStop' AND E.PathKey = Ref.PathKey AND E.SHA256 = Ref.SHA256 AND E.Line = Ref.Line)
+  LET TransferUses(Ref) = SELECT LinkStatus FROM AcceptedTransfers
+    WHERE (TStart.PathKey = Ref.PathKey AND TStart.SHA256 = Ref.SHA256 AND TStart.Line = Ref.Line)
+       OR (TFinish.PathKey = Ref.PathKey AND TFinish.SHA256 = Ref.SHA256 AND TFinish.Line = Ref.Line)
+
+sources:
+  - name: ConnectionSummary
+    query: |
+      LET SummaryInputs = SELECT Evidence AS ParentConnection, LinksFor(TargetConnection=Evidence).LinkStatus AS LinkStatuses,
+          AcceptedFor(TargetConnection=Evidence).S AS Starts, AcceptedFor(TargetConnection=Evidence).E AS Ends,
+          AcceptedFor(TargetConnection=Evidence).LinkStatus AS AcceptedStatuses
+        FROM ConnectionEvidence
+      LET Summaries = SELECT *,
+          if(condition=len(list=LinkStatuses)=0, then='NoReviewedLink',
+             else=if(condition=len(list=LinkStatuses)!=1,then='AmbiguousBinding',else=LinkStatuses[0])) AS CorrelationStatus
+        FROM SummaryInputs
+      SELECT ParentConnection.WallTime AS ConnectionWallTime, 'OffsetUnknown' AS TimeBasis,
+          ParentConnection.Direction AS Direction, ParentConnection.PeerID AS PeerID,
+          ParentConnection.Status AS RecordedStatus,
+          if(condition=ParentConnection.Status='REJECTED',then='接続拒否の記録',
+            else=if(condition=CorrelationStatus='LinkedStartStop',then='開始・停止の対応あり',
+            else=if(condition=CorrelationStatus='StartOnly',then='開始の対応あり／終了未確認',else='接続記録のみ／対応未確認'))) AS Summary,
+          Starts[0].WallTime AS SessionStartWallTime,
+          if(condition=CorrelationStatus='LinkedStartStop',then=Ends[0].WallTime) AS SessionEndWallTime,
+          CorrelationStatus, if(condition=len(list=AcceptedStatuses)=1,then='AnalystSuppliedAssociation',else='Unassociated') AS AssociationBasis,
+          TransfersFor(TargetConnection=ParentConnection) AS TransferFiles,
+          len(list=TransfersFor(TargetConnection=ParentConnection).FileName) AS LinkedTransferFiles,
+          ParentConnection.Path AS ConnectionSourcePath, ParentConnection.SHA256 AS ConnectionSourceSHA256,
+          ParentConnection.Line AS ConnectionSourceLine, Starts[0].Path AS SessionSourcePath,
+          Starts[0].SHA256 AS SessionSourceSHA256, Starts[0].Line AS SessionStartLine,
+          if(condition=CorrelationStatus='LinkedStartStop',then=Ends[0].Line) AS SessionEndLine,
+          '対応表のsource参照を検査した関連付け。共通session IDや内容同一性の証明ではない' AS Note
+      FROM Summaries ORDER BY ConnectionWallTime
+  - name: UnlinkedEvents
+    query: |
+      SELECT Evidence.Path AS SourcePath, Evidence.SHA256 AS SourceSHA256, Evidence.Line AS SourceLine,
+          Evidence.EventType AS EventType, Evidence.WallTime AS EventWallTime,
+          Evidence.Status AS RecordedStatus, Evidence.FileName AS FileName,
+          'NoValidatedReviewedLink' AS Reason
+      FROM EvidenceRows
+      WHERE (Evidence.EventType IN ('SessionStarted','SessionStopped') OR Evidence.LogKind='transfer')
+        AND len(list=SessionUses(Ref=Evidence).LinkStatus)=0 AND len(list=TransferUses(Ref=Evidence).LinkStatus)=0
+  - name: LinkIssues
+    query: |
+      SELECT * FROM chain(
+        connection={ SELECT 'Connection' AS LinkType, ConnectionPath AS SourcePath,
+            ConnectionSHA256 AS SourceSHA256, ConnectionLine AS SourceLine, LinkStatus AS Reason
+          FROM CheckedConnectionLinks WHERE NOT LinkStatus IN ('LinkedStartStop','StartOnly') },
+        transfer={ SELECT 'Transfer' AS LinkType, TransferPath AS SourcePath,
+            TransferSHA256 AS SourceSHA256, StartLine AS SourceLine, LinkStatus AS Reason
+          FROM CheckedTransferLinks WHERE LinkStatus != 'LinkedTransferPair' })
+  - name: LogOverview
+    query: |
+      SELECT Directory,
+          sum(item=if(condition=LogKind = 'connection', then=1, else=0)) AS ConnectionRecords,
+          sum(item=if(condition=LogKind = 'connection' AND Record.Status = 'REJECTED', then=1, else=0)) AS RejectedRecords,
+          sum(item=if(condition=EventType = 'SessionStarted', then=1, else=0)) AS SessionStarts,
+          sum(item=if(condition=LogKind = 'transfer' AND Record.Status = 'finish', then=1, else=0)) AS TransferFinishes,
+          sum(item=if(condition=LogKind = 'transfer' AND Record.Status = 'cancel', then=1, else=0)) AS TransferCancels,
+          min(item=EventWallTime) AS FirstWallTime, max(item=EventWallTime) AS LastWallTime,
+          'OffsetUnknown' AS TimeBasis,
+          '件数はログの記録数。sessionとの自動結合・悪性判定は行わない' AS Note
+      FROM ParsedRows GROUP BY Directory
+  - name: Connections
+    query: |
+      SELECT EventWallTime, 'OffsetUnknown' AS TimeBasis, Precision,
+          Record.Direction AS Direction, Record.Status AS RecordedStatus,
+          if(condition=Record.Status = 'REJECTED', then='接続拒否の記録',
+            else=if(condition=Record.Status = 'User', then='Userと記録。session開始を併せて確認', else='未確認のstatus')) AS Meaning,
+          Record.PeerID AS PeerID, Record.SecondPeerField AS SecondPeerField,
+          RawTime, RawLine, OSPath AS SourcePath, SourceLine, HashInfo.SHA256 AS SourceSHA256
+      FROM ParsedRows WHERE LogKind = 'connection' ORDER BY EventWallTime
+  - name: FileTransfers
+    query: |
+      SELECT EventWallTime, 'OffsetUnknown' AS TimeBasis, Precision,
+          Record.Status AS RecordedStatus, Record.Direction AS Direction,
+          if(condition=Record.Direction = 'upload', then='この端末から送信', else='この端末へ受信') AS Meaning,
+          Record.TransferMethod AS TransferMethod, Record.FileName AS FileName,
+          Record.ProgressValue AS ProgressValue, Record.ProgressUnit AS ProgressUnit,
+          Record.TotalValue AS TotalValue, Record.TotalUnit AS TotalUnit,
+          if(condition=Record.ProgressUnit='B',then=int(int=Record.ProgressValue)) AS ProgressBytes,
+          if(condition=Record.TotalUnit='B',then=int(int=Record.TotalValue)) AS TotalBytes,
+          if(condition=Record.ProgressUnit='B' AND Record.TotalUnit='B',then='ReportedIntegerBytes',else='RoundedDisplayAmounts') AS AmountPrecision,
+          if(condition=Record.Status='cancel',then='中止記録',else=if(condition=Record.Status='start',then='開始記録',else='終了記録。受領内容と成功は別途確認')) AS StatusMeaning,
+          'basenameと進捗の記録。絶対path・相手ID・内容hashはこの行にない' AS Note,
+          RawTime, RawLine, OSPath AS SourcePath, SourceLine, HashInfo.SHA256 AS SourceSHA256
+      FROM ParsedRows WHERE LogKind = 'transfer' ORDER BY EventWallTime
+  - name: ChatMessages
+    query: |
+      SELECT Record.SenderLabel AS SenderLabel, Record.ChatMessage AS Message,
+          if(condition=Record.SenderLabel IN ('Me','自分'),then='自端末の表示label',
+             else=if(condition=Record.SenderLabel='-',then='相手側のplaceholder。身元は未証明',else='未確認のsender label')) AS SenderMeaning,
+          NULL AS MessageWallTime, 'NoIndividualTimestamp' AS Precision, 'OffsetUnknown' AS TimeBasis,
+          Headers[0].HeaderRawTime AS HeaderRawTime, Headers[0].SourceLine AS HeaderSourceLine,
+          if(condition=len(list=Headers)=0,then='MissingHeader',else=if(condition=Headers[0].DateCheck,then='ValidHeader',else='InvalidHeaderDate')) AS HeaderStatus,
+          parse_string_with_regex(string=str(str=OSPath.Basename),regex='''^(?P<PeerFileStem>\d+)\.txt$''').PeerFileStem AS PeerFileStem,
+          RawLine, OSPath AS SourcePath, SourceLine, HashInfo.SHA256 AS SourceSHA256,
+          '見出し時刻を個別messageへ付与しない。同じ相手の複数sessionが累積し得る。接続へ自動結合しない' AS Note
+      FROM ChatRows ORDER BY SourceLine
+  - name: KeyEvents
+    query: |
+      SELECT EventWallTime, 'OffsetUnknown' AS TimeBasis, Precision,
+          EventType, get(item=EventMap, member=EventType) AS Meaning,
+          Record.Level AS Level, Record.Process AS Process, Record.PID AS PID,
+          Record.TID AS TID, Record.Context AS Context, Record.Component AS Component,
+          RawTime, RawLine, OSPath AS SourcePath, SourceLine, HashInfo.SHA256 AS SourceSHA256
+      FROM ParsedRows WHERE LogKind = 'ad' ORDER BY EventWallTime
+  - name: ParseCoverage
+    query: |
+      LET FileCoverage = SELECT str(str=OSPath) AS CoveragePath,
+          count() AS NonEmptyLines,
+          sum(item=if(condition=(Record.RawTime AND DateCheck AND EventType) OR (LogKind='chat' AND EventType='ChatMessage'), then=1, else=0)) AS SelectedRows,
+          sum(item=if(condition=NOT ASCIIOnly, then=1, else=0)) AS EncodingReviewLines,
+          sum(item=if(condition=(LogKind='transfer' AND NOT AmountValid) OR (ASCIIOnly AND NOT Record.RawTime AND EventType != 'ChatMessage' AND NOT RawLine =~ '''^\s*\*'''), then=1, else=0)) AS UnsupportedLines,
+          sum(item=if(condition=Record.RawTime AND NOT DateCheck, then=1, else=0)) AS InvalidDateLines,
+          sum(item=if(condition=Record.RawTime AND DateCheck AND NOT EventType, then=1, else=0)) AS UnselectedStructuredLines
+        FROM TimeCheckedRows GROUP BY OSPath
+      LET FileValid(Path) = SELECT EncodingValid FROM ValidFiles WHERE OSPath = Path
+      LET CoverageInputs = SELECT *, OSPath AS CoverageSource FROM LoadedFiles
+      LET Coverage = SELECT LogKind, OSPath AS SourcePath, Size,
+          HashInfo.SHA256 AS SourceSHA256,
+          if(condition=NOT LogKind IN ('ad', 'connection', 'transfer', 'chat'), then='UnknownLogKind',
+            else=if(condition=Size > MaxLogBytes, then='SizeLimit',
+            else=if(condition=len(list=Bytes) != Size, then='ReadLengthMismatch',
+            else=if(condition=FileValid(Path=CoverageSource).EncodingValid[0],
+               then='Read', else='InvalidUTF16LE')))) AS ReadStatus,
+          { SELECT * FROM FileCoverage WHERE CoveragePath = str(str=CoverageSource) } AS LineCoverage,
+          if(condition=LogKind = 'ad', then='ASCII events only; non-ASCII needs encoding review', else='UTF-16LE roundtrip checked') AS EncodingPolicy
+        FROM CoverageInputs
+      SELECT * FROM Coverage
+  - name: ReviewLines
+    query: |
+      SELECT LogKind, OSPath AS SourcePath, SourceLine, HashInfo.SHA256 AS SourceSHA256,
+          if(condition=NOT ASCIIOnly, then='EncodingReview',
+            else=if(condition=Record.RawTime AND NOT DateCheck, then='InvalidDate', else=if(condition=LogKind='transfer' AND NOT AmountValid,then='UnsupportedFormat',else='UnsupportedFormat'))) AS Reason,
+          if(condition=LogKind != 'ad', then=RawLine) AS RawLine,
+          '原本の該当行を確認。ad.traceの未知messageは機微情報を避けて転載しない' AS Note
+      FROM TimeCheckedRows
+      WHERE NOT ASCIIOnly OR (Record.RawTime AND NOT DateCheck)
+        OR (LogKind='transfer' AND NOT AmountValid)
+        OR (ASCIIOnly AND NOT Record.RawTime AND EventType != 'ChatMessage' AND NOT RawLine =~ '''^\s*\*''')
+  - name: ConfiguredTargets
+    query: |
+      LET TargetMatches(Target) = SELECT OSPath FROM glob(globs=Target, accessor=Accessor) WHERE NOT IsDir
+      SELECT LogKind, Glob AS SourceGlob,
+          len(list=TargetMatches(Target=Glob).OSPath) AS MatchedFiles,
+          '0件は指定pathで未検出。AnyDesk利用不存在の証明ではない' AS Note
+      FROM LogGlobs
+  - name: FileInventory
+    query: |
+      SELECT LogKind, OSPath AS SourcePath, Directory, SourceGlob,
+          Size, Mtime, Ctime, Btime, Atime, HashInfo,
+          'NotApplicableTextLog' AS SignatureStatus,
+          'ログのmetadata。file時刻を接続・転送日時と同一視しない' AS Note
+      FROM LoadedFiles
+column_types:
+  - name: HashInfo
+    type: collapsed
+  - name: LineCoverage
+    type: collapsed
