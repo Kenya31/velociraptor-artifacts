@@ -4,6 +4,26 @@ This repository contains custom Velociraptor artifacts designed for **dead disk 
 
 These artifacts focus on improving accuracy and visibility when analyzing **offline Windows systems (disk images)** using `raw_reg` and `ntfs` accessors.
 
+取得済みのアプリケーションログを解析するArtifactも収録している。永続化などのOS調査用は`Forensics/`、製品固有のログ解析用は`Applications/`へ配置する。
+
+## Repository Structure
+
+```text
+artifacts/
+└── Windows/
+    ├── Applications/
+    │   └── AnyDesk/
+    │       ├── Trace.DeadDisk.yaml
+    │       └── README.md
+    └── Forensics/
+        ├── Services/DeadDisk.yaml
+        ├── RunKeys/DeadDisk.yaml
+        ├── ScheduledTasks/DeadDisk.yaml
+        ├── LogonPoints/DeadDisk.yaml
+        └── WMI/DeadDisk.yaml
+examples/                    # 既存Artifactの出力例
+```
+
 ---
 
 ## Overview
@@ -187,6 +207,20 @@ Enumerates carved WMI permanent event subscription evidence from an offline Wind
 - `CarvedBindings` is the primary source for Autoruns-like review.
 - `ObservedWMIStrings` is fallback triage evidence, not final persistence attribution.
 - Full WMI subscription reconstruction requires a dedicated WMI repository parser.
+
+---
+
+### 6. Windows.Applications.AnyDesk.Trace.DeadDisk
+
+AnyDeskの接続要求、ファイル転送、Chat、選択した診断イベントを、保存済みログから一覧化する。
+
+- `connection_trace.txt`、`file_transfer_trace.txt`、`ad.trace`、`chat/*.txt`を解析。
+- File Manager / Clipboard、開始・完了・中止、送受信方向、転送量を表示。
+- 接続サマリーは、解析者が確認した対応表を指定した場合に開始・終了・転送を集約。
+- 各出力行に元ログのパス・SHA256・行番号を保持。
+- AnyDesk 9.8.0のポータブル版で生成した保存ログと、Velociraptor 0.76.3で検証済み。実ディスクイメージのremap・インストール版・別バージョンは未検証。
+
+[Artifact定義](artifacts/Windows/Applications/AnyDesk/Trace.DeadDisk.yaml) / [入力・出力・Parameters](artifacts/Windows/Applications/AnyDesk/README.md)
 
 ---
 
